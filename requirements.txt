@@ -1,0 +1,11 @@
+aiohttp
+requests
+websockets
+python-dotenv
+pytz
+ccxt
+ta
+pandas
+numpy
+scipy
+python-telegram-bot==13.15

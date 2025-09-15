@@ -742,6 +742,7 @@ async def run_core_bot():
     log(f"✅ CORE STRATEGY: Fetched {len(symbols)} symbols.")
 
     load_active_trades()
+    
     await sync_bot_with_bybit(send_telegram=True)
     
     if len(active_trades) == 0:

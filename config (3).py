@@ -7,7 +7,7 @@ BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
 BYBIT_API_URL = "https://api.bybit.com"
 
-TELEGRAM_BOT_TOKEN = "7803544014:AAGLJVwfTg4Ij5lzI8RIVRfrZkKG9uIZnh4"
+TELEGRAM_BOT_TOKEN = "8336032424:AAFgbQJVfXWOE3ZadJtkp7j4gm002Sa0MMo"
 TELEGRAM_CHAT_ID = "1806610681"
 TELEGRAM_ASSISTANT_CHAT_ID = "-1000000000000"  # optional
 
@@ -187,3 +187,4 @@ STRATEGY_REGIME_PREFERENCES = {
     "swing": ["trending", "ranging"],
     "range_break": ["ranging", "consolidating"]
 }
+

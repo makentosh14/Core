@@ -404,7 +404,7 @@ def validate_core_trend_coherence(core_candles, direction):
     try:
         trend_scores = {}
         
-        for tf in ['1', '5', '15']:
+        for tf in ['1', '5', '15', '30', '60', '240']:
             if tf not in core_candles:
                 return False
             
@@ -805,3 +805,4 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+

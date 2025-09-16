@@ -907,7 +907,40 @@ class MultiSourceSentimentAnalyzer:
             return self._get_default_sentiment()
     
     async def _get_fear_greed_index(self) -> Dict[str, Any]:
-        """Get Fear & Greed Index (simulated based on volatility)"""
+        """Get Fear & Greed Index (with smart fallback)"""
+        try:
+            # Try to import and use the API manager
+            from api_config import get_fear_greed
+            
+            fg_value = await get_fear_greed()
+            
+            # Map to sentiment
+            if fg_value <= 20:
+                sentiment = "extreme_fear"
+            elif fg_value <= 40:
+                sentiment = "fear"
+            elif fg_value <= 60:
+                sentiment = "neutral"
+            elif fg_value <= 80:
+                sentiment = "greed"
+            else:
+                sentiment = "extreme_greed"
+            
+            return {
+                "value": fg_value,
+                "sentiment": sentiment,
+                "strength": min(abs(fg_value - 50) / 50, 1.0)
+            }
+            
+        except ImportError:
+            log("⚠️ API config not available, using built-in fallback", level="WARNING")
+            return await self._builtin_fear_greed_fallback()
+        except Exception as e:
+            log(f"❌ Error getting fear & greed index: {e}", level="ERROR")
+            return await self._builtin_fear_greed_fallback()
+    
+    async def _builtin_fear_greed_fallback(self) -> Dict[str, Any]:
+        """Built-in fallback that works with just Bybit API"""
         try:
             # Get BTC volatility as proxy for fear/greed
             response = await signed_request("GET", "/v5/market/kline", {
@@ -952,7 +985,7 @@ class MultiSourceSentimentAnalyzer:
             }
             
         except Exception as e:
-            log(f"❌ Error getting fear & greed index: {e}", level="ERROR")
+            log(f"❌ Built-in fear & greed fallback failed: {e}", level="ERROR")
             return {"value": 50, "sentiment": "neutral", "strength": 0.5}
     
     async def _analyze_social_volume(self) -> Dict[str, Any]:

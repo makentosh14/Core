@@ -8,6 +8,7 @@ from websocket_candles import live_candles, stream_candles, SUPPORTED_INTERVALS
 from score import score_symbol, determine_direction, calculate_confidence, has_pump_potential, detect_momentum_strength
 from telegram_bot import send_telegram_message, format_trade_signal, send_error_to_telegram
 from trend_filters import get_trend_context_cached, monitor_btc_trend_accuracy, monitor_altseason_status, validate_short_signal
+from trend_upgrade_integration import get_trend_context_cached
 from signal_memory import log_signal, is_duplicate_signal
 from config import (
     DEFAULT_LEVERAGE, ALWAYS_ALLOW_SWING, ALTSEASON_MODE, NORMAL_MAX_POSITIONS,
@@ -805,5 +806,6 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+
 
 

@@ -1,1176 +1,1911 @@
-# trend_filters.py - COMPLETE FIXES FOR ALL 13 ISSUES
+# enhanced_trend_filters.py - Advanced Trend Detection System
 """
-Enhanced Trend detection and market context analysis with multi-timeframe BTC analysis
-ALL ISSUES FIXED WITH PRECISE CORRECTIONS
+Enhanced trend detection with:
+1. Market Structure Analysis
+2. Advanced Altseason Detection
+3. Multi-source Sentiment Analysis
+4. Volume Profile Engine
+5. Institutional Activity Detection
 """
+
 import asyncio
 import numpy as np
 from datetime import datetime, timedelta
+from collections import deque, defaultdict
+from typing import Dict, List, Tuple, Optional, Any
 from bybit_api import signed_request
 from logger import log
-from collections import deque
+import aiohttp
+import json
 
-class AltseasonDetector:
-    """
-    Detects altseason conditions based on multiple metrics - FIXED VERSION
-    """
+class MarketStructureAnalyzer:
+    """Advanced market structure analysis for trend detection"""
     
     def __init__(self):
-        self.btc_dominance_history = deque(maxlen=30)
-        self.alt_performance_history = deque(maxlen=30)
-        self.is_altseason = False
-        self.altseason_strength = 0
-        # FIX #4: Initialize last_season to prevent AttributeError
-        self.last_season = "neutral"
+        self.support_levels = []
+        self.resistance_levels = []
+        self.market_structure = "neutral"
+        self.structure_strength = 0.5
         
-    async def detect_altseason(self):
+    async def analyze_market_structure(self, symbol: str = "BTCUSDT") -> Dict[str, Any]:
         """
-        Detect if we're in altseason based on:
-        1. BTC dominance declining
-        2. Majority of alts outperforming BTC
-        3. Alt market cap increasing faster than BTC
-        4. Alt volume surge
+        Analyze market structure using advanced techniques:
+        - Higher highs / Lower lows pattern
+        - Support/Resistance levels
+        - Breakout potential
+        - Volume at key levels
         """
-        
-        altseason_scores = {
-            'strong_altseason': 0,
-            'altseason': 0,
-            'neutral': 0,
-            'btc_season': 0
-        }
-        
-        analysis_details = {}
-        
-        # 1. Check alt performance vs BTC
-        alt_performance = await self._analyze_alt_performance()
-        altseason_scores[alt_performance['season']] += alt_performance['weight']
-        analysis_details['alt_performance'] = alt_performance
-        
-        # 2. Check volume distribution
-        volume_analysis = await self._analyze_volume_distribution()
-        altseason_scores[volume_analysis['season']] += volume_analysis['weight']
-        analysis_details['volume'] = volume_analysis
-        
-        # 3. Check momentum shift
-        momentum_shift = await self._analyze_momentum_shift()
-        altseason_scores[momentum_shift['season']] += momentum_shift['weight']
-        analysis_details['momentum'] = momentum_shift
-        
-        # 4. Check market breadth
-        breadth_analysis = await self._analyze_market_breadth()
-        altseason_scores[breadth_analysis['season']] += breadth_analysis['weight']
-        analysis_details['breadth'] = breadth_analysis
-        
-        # Determine final altseason status
-        total_score = sum(altseason_scores.values())
-        if total_score == 0:
-            season = 'neutral'
-            strength = 0
-        else:
-            season = max(altseason_scores.items(), key=lambda x: x[1])[0]
-            strength = altseason_scores[season] / total_score
-        
-        # Update state
-        self.is_altseason = season in ['altseason', 'strong_altseason']
-        self.altseason_strength = strength if self.is_altseason else 0
-        
-        # Log significant changes
-        if self.last_season != season:
-            log(f"🔄 Market Season Change: {self.last_season} → {season} (strength: {strength:.2f})")
+        try:
+            # Get multiple timeframe data
+            timeframes = ["1", "5", "15", "60", "240"]
+            candle_data = {}
             
-            if season == 'strong_altseason':
-                try:
-                    from telegram_bot import send_telegram_message
-                    await send_telegram_message(
-                        f"🚀 <b>ALTSEASON DETECTED!</b>\n"
-                        f"Strength: {strength:.2%}\n"
-                        f"Alt coins showing strong outperformance vs BTC"
-                    )
-                except:
-                    pass
+            for tf in timeframes:
+                response = await signed_request("GET", "/v5/market/kline", {
+                    "category": "linear",
+                    "symbol": symbol,
+                    "interval": tf,
+                    "limit": 100
+                })
+                
+                if response.get("retCode") == 0:
+                    candle_data[tf] = response["result"]["list"]
+            
+            if not candle_data:
+                return self._get_default_structure()
+            
+            # Analyze structure across timeframes
+            structure_signals = {}
+            
+            for tf, candles in candle_data.items():
+                if len(candles) >= 50:
+                    tf_analysis = self._analyze_timeframe_structure(candles, tf)
+                    structure_signals[tf] = tf_analysis
+            
+            # Combine timeframe analysis
+            overall_structure = self._combine_structure_signals(structure_signals)
+            
+            # Detect key levels
+            key_levels = await self._detect_key_levels(candle_data)
+            
+            # Calculate breakout probability
+            breakout_analysis = self._analyze_breakout_potential(candle_data, key_levels)
+            
+            result = {
+                "structure": overall_structure["trend"],
+                "strength": overall_structure["strength"],
+                "confidence": overall_structure["confidence"],
+                "key_levels": key_levels,
+                "breakout_probability": breakout_analysis,
+                "timeframe_analysis": structure_signals,
+                "market_phase": self._determine_market_phase(overall_structure, breakout_analysis)
+            }
+            
+            self.market_structure = result["structure"]
+            self.structure_strength = result["strength"]
+            
+            return result
+            
+        except Exception as e:
+            log(f"❌ Error analyzing market structure: {e}", level="ERROR")
+            return self._get_default_structure()
+    
+    def _analyze_timeframe_structure(self, candles: List, timeframe: str) -> Dict[str, Any]:
+        """Analyze market structure for a specific timeframe"""
+        try:
+            # Convert candle data
+            highs = [float(c[2]) for c in candles]
+            lows = [float(c[3]) for c in candles]
+            closes = [float(c[4]) for c in candles]
+            volumes = [float(c[5]) for c in candles]
+            
+            # Find swing highs and lows
+            swing_highs = self._find_swing_points(highs, "high")
+            swing_lows = self._find_swing_points(lows, "low")
+            
+            # Analyze pattern
+            hh_ll_pattern = self._analyze_hh_ll_pattern(swing_highs, swing_lows)
+            
+            # Volume analysis at key points
+            volume_confirmation = self._analyze_volume_at_swings(
+                swing_highs, swing_lows, volumes, closes
+            )
+            
+            # Calculate trend strength
+            trend_strength = self._calculate_trend_strength(
+                hh_ll_pattern, volume_confirmation, closes
+            )
+            
+            return {
+                "trend": hh_ll_pattern["trend"],
+                "strength": trend_strength,
+                "swing_highs": swing_highs,
+                "swing_lows": swing_lows,
+                "volume_confirmation": volume_confirmation,
+                "timeframe": timeframe
+            }
+            
+        except Exception as e:
+            log(f"❌ Error analyzing {timeframe} structure: {e}", level="ERROR")
+            return {"trend": "neutral", "strength": 0.5, "timeframe": timeframe}
+    
+    def _find_swing_points(self, data: List[float], point_type: str) -> List[Tuple[int, float]]:
+        """Find swing highs or lows in price data"""
+        swing_points = []
+        lookback = 5
         
-        self.last_season = season
+        for i in range(lookback, len(data) - lookback):
+            if point_type == "high":
+                if all(data[i] >= data[j] for j in range(i-lookback, i+lookback+1) if j != i):
+                    swing_points.append((i, data[i]))
+            else:  # low
+                if all(data[i] <= data[j] for j in range(i-lookback, i+lookback+1) if j != i):
+                    swing_points.append((i, data[i]))
+        
+        return swing_points[-10:]  # Keep last 10 swing points
+    
+    def _analyze_hh_ll_pattern(self, swing_highs: List, swing_lows: List) -> Dict[str, Any]:
+        """Analyze Higher High/Lower Low patterns"""
+        if len(swing_highs) < 3 or len(swing_lows) < 3:
+            return {"trend": "neutral", "pattern": "insufficient_data"}
+        
+        # Check recent highs pattern
+        recent_highs = [h[1] for h in swing_highs[-3:]]
+        recent_lows = [l[1] for l in swing_lows[-3:]]
+        
+        # Higher highs and higher lows = uptrend
+        hh = all(recent_highs[i] > recent_highs[i-1] for i in range(1, len(recent_highs)))
+        hl = all(recent_lows[i] > recent_lows[i-1] for i in range(1, len(recent_lows)))
+        
+        # Lower highs and lower lows = downtrend
+        lh = all(recent_highs[i] < recent_highs[i-1] for i in range(1, len(recent_highs)))
+        ll = all(recent_lows[i] < recent_lows[i-1] for i in range(1, len(recent_lows)))
+        
+        if hh and hl:
+            return {"trend": "uptrend", "pattern": "hh_hl", "strength": 0.8}
+        elif lh and ll:
+            return {"trend": "downtrend", "pattern": "lh_ll", "strength": 0.8}
+        elif hh and not hl:
+            return {"trend": "weak_uptrend", "pattern": "hh_only", "strength": 0.6}
+        elif hl and not hh:
+            return {"trend": "weak_uptrend", "pattern": "hl_only", "strength": 0.6}
+        elif lh and not ll:
+            return {"trend": "weak_downtrend", "pattern": "lh_only", "strength": 0.6}
+        elif ll and not lh:
+            return {"trend": "weak_downtrend", "pattern": "ll_only", "strength": 0.6}
+        else:
+            return {"trend": "ranging", "pattern": "mixed", "strength": 0.4}
+    
+    def _analyze_volume_at_swings(self, swing_highs: List, swing_lows: List, 
+                                 volumes: List, closes: List) -> Dict[str, Any]:
+        """Analyze volume confirmation at swing points"""
+        try:
+            avg_volume = np.mean(volumes)
+            volume_confirmations = []
+            
+            # Check volume at swing highs
+            for idx, price in swing_highs[-3:]:
+                if idx < len(volumes):
+                    vol_ratio = volumes[idx] / avg_volume
+                    volume_confirmations.append({
+                        "type": "high",
+                        "volume_ratio": vol_ratio,
+                        "confirmed": vol_ratio > 1.2
+                    })
+            
+            # Check volume at swing lows
+            for idx, price in swing_lows[-3:]:
+                if idx < len(volumes):
+                    vol_ratio = volumes[idx] / avg_volume
+                    volume_confirmations.append({
+                        "type": "low", 
+                        "volume_ratio": vol_ratio,
+                        "confirmed": vol_ratio > 1.2
+                    })
+            
+            confirmation_rate = sum(1 for v in volume_confirmations if v["confirmed"]) / len(volume_confirmations) if volume_confirmations else 0
+            
+            return {
+                "confirmation_rate": confirmation_rate,
+                "confirmations": volume_confirmations,
+                "volume_trend": "increasing" if volumes[-5:] > volumes[-10:-5] else "decreasing"
+            }
+            
+        except Exception as e:
+            return {"confirmation_rate": 0.5, "confirmations": [], "volume_trend": "neutral"}
+    
+    def _calculate_trend_strength(self, hh_ll_pattern: Dict, volume_confirmation: Dict, closes: List) -> float:
+        """Calculate overall trend strength"""
+        base_strength = hh_ll_pattern.get("strength", 0.5)
+        volume_boost = volume_confirmation.get("confirmation_rate", 0.5) * 0.3
+        
+        # Price momentum component
+        momentum = (closes[-1] - closes[-20]) / closes[-20] if len(closes) >= 20 else 0
+        momentum_component = min(abs(momentum) * 2, 0.2)
+        
+        return min(base_strength + volume_boost + momentum_component, 1.0)
+    
+    async def _detect_key_levels(self, candle_data: Dict) -> Dict[str, List[float]]:
+        """Detect key support and resistance levels"""
+        try:
+            all_highs = []
+            all_lows = []
+            
+            # Collect data from multiple timeframes
+            for tf, candles in candle_data.items():
+                if tf in ["15", "60", "240"]:  # Focus on higher timeframes for key levels
+                    highs = [float(c[2]) for c in candles]
+                    lows = [float(c[3]) for c in candles]
+                    all_highs.extend(highs)
+                    all_lows.extend(lows)
+            
+            # Find resistance levels (areas where price has been rejected)
+            resistance_levels = self._find_level_clusters(all_highs, "resistance")
+            
+            # Find support levels (areas where price has bounced)
+            support_levels = self._find_level_clusters(all_lows, "support")
+            
+            return {
+                "resistance": resistance_levels,
+                "support": support_levels,
+                "key_level_strength": len(resistance_levels) + len(support_levels)
+            }
+            
+        except Exception as e:
+            log(f"❌ Error detecting key levels: {e}", level="ERROR")
+            return {"resistance": [], "support": [], "key_level_strength": 0}
+    
+    def _find_level_clusters(self, prices: List[float], level_type: str) -> List[float]:
+        """Find clustered price levels that act as support/resistance"""
+        if not prices:
+            return []
+        
+        # Create price histogram
+        min_price, max_price = min(prices), max(prices)
+        price_range = max_price - min_price
+        bin_size = price_range / 100  # 100 bins
+        
+        level_counts = defaultdict(int)
+        
+        for price in prices:
+            bin_level = round(price / bin_size) * bin_size
+            level_counts[bin_level] += 1
+        
+        # Find levels with high touch count
+        significant_levels = []
+        for level, count in level_counts.items():
+            if count >= 3:  # Level touched at least 3 times
+                significant_levels.append((level, count))
+        
+        # Sort by importance and return top levels
+        significant_levels.sort(key=lambda x: x[1], reverse=True)
+        return [level for level, count in significant_levels[:5]]
+    
+    def _analyze_breakout_potential(self, candle_data: Dict, key_levels: Dict) -> Dict[str, Any]:
+        """Analyze potential for breakouts from current levels"""
+        try:
+            if "5" not in candle_data:
+                return {"probability": 0.5, "direction": "neutral"}
+            
+            current_candles = candle_data["5"]
+            current_price = float(current_candles[0][4])  # Latest close
+            current_volume = float(current_candles[0][5])
+            
+            # Check proximity to key levels
+            resistance_levels = key_levels.get("resistance", [])
+            support_levels = key_levels.get("support", [])
+            
+            nearest_resistance = min(resistance_levels, key=lambda x: abs(x - current_price)) if resistance_levels else None
+            nearest_support = min(support_levels, key=lambda x: abs(x - current_price)) if support_levels else None
+            
+            # Calculate distance to key levels
+            resistance_distance = abs(nearest_resistance - current_price) / current_price if nearest_resistance else 1
+            support_distance = abs(nearest_support - current_price) / current_price if nearest_support else 1
+            
+            # Volume analysis for breakout
+            avg_volume = np.mean([float(c[5]) for c in current_candles[-20:]])
+            volume_surge = current_volume / avg_volume if avg_volume > 0 else 1
+            
+            # Calculate breakout probability
+            base_probability = 0.5
+            
+            # Higher probability near key levels
+            if resistance_distance < 0.02:  # Within 2%
+                base_probability += 0.2
+                direction_bias = "bullish"
+            elif support_distance < 0.02:
+                base_probability += 0.2
+                direction_bias = "bearish"
+            else:
+                direction_bias = "neutral"
+            
+            # Volume surge increases probability
+            if volume_surge > 1.5:
+                base_probability += 0.2
+            
+            # Price momentum component
+            recent_prices = [float(c[4]) for c in current_candles[-10:]]
+            momentum = (recent_prices[-1] - recent_prices[0]) / recent_prices[0]
+            
+            if abs(momentum) > 0.02:  # 2% momentum
+                base_probability += 0.1
+                if momentum > 0 and direction_bias != "bearish":
+                    direction_bias = "bullish"
+                elif momentum < 0 and direction_bias != "bullish":
+                    direction_bias = "bearish"
+            
+            return {
+                "probability": min(base_probability, 0.9),
+                "direction": direction_bias,
+                "nearest_resistance": nearest_resistance,
+                "nearest_support": nearest_support,
+                "volume_surge": volume_surge,
+                "momentum": momentum
+            }
+            
+        except Exception as e:
+            log(f"❌ Error analyzing breakout potential: {e}", level="ERROR")
+            return {"probability": 0.5, "direction": "neutral"}
+    
+    def _combine_structure_signals(self, structure_signals: Dict) -> Dict[str, Any]:
+        """Combine structure analysis from multiple timeframes"""
+        if not structure_signals:
+            return {"trend": "neutral", "strength": 0.5, "confidence": 30}
+        
+        # Weight timeframes by importance
+        tf_weights = {"1": 0.1, "5": 0.2, "15": 0.3, "60": 0.25, "240": 0.15}
+        
+        trend_scores = {"uptrend": 0, "downtrend": 0, "neutral": 0, "ranging": 0}
+        total_weight = 0
+        strengths = []
+        
+        for tf, analysis in structure_signals.items():
+            weight = tf_weights.get(tf, 0.1)
+            trend = analysis.get("trend", "neutral")
+            strength = analysis.get("strength", 0.5)
+            
+            # Map trend variations to main categories
+            if "uptrend" in trend:
+                trend_scores["uptrend"] += weight * strength
+            elif "downtrend" in trend:
+                trend_scores["downtrend"] += weight * strength
+            elif trend == "ranging":
+                trend_scores["ranging"] += weight * strength
+            else:
+                trend_scores["neutral"] += weight * strength
+            
+            total_weight += weight
+            strengths.append(strength)
+        
+        # Normalize scores
+        if total_weight > 0:
+            for trend in trend_scores:
+                trend_scores[trend] /= total_weight
+        
+        # Determine overall trend
+        overall_trend = max(trend_scores.items(), key=lambda x: x[1])[0]
+        overall_strength = trend_scores[overall_trend]
+        
+        # Calculate confidence based on agreement across timeframes
+        confidence = np.mean(strengths) * 100 if strengths else 50
+        confidence = max(30, min(95, confidence))
         
         return {
-            'is_altseason': self.is_altseason,
-            'season': season,
-            'strength': strength,
-            'details': analysis_details
+            "trend": overall_trend,
+            "strength": overall_strength,
+            "confidence": confidence,
+            "trend_scores": trend_scores
         }
     
-    async def _analyze_alt_performance(self):
-        """
-        Check how many alts are outperforming BTC
-        FIX #1: Remove double-scaling of price24hPcnt
-        FIX #3: Use concurrent API calls instead of sequential
-        ADDITIONAL FIX: Handle empty API response lists properly
-        """
+    def _determine_market_phase(self, structure: Dict, breakout: Dict) -> str:
+        """Determine current market phase"""
+        trend = structure.get("trend", "neutral")
+        strength = structure.get("strength", 0.5)
+        breakout_prob = breakout.get("probability", 0.5)
         
-        try:
-            # Top altcoins to check
-            alt_symbols = ["ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", 
-                          "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "MATICUSDT", 
-                          "DOTUSDT", "LINKUSDT", "UNIUSDT", "ATOMUSDT"]
-            
-            # FIX #3: Fire API calls concurrently instead of sequentially
-            tasks = []
-            
-            # BTC performance first
-            tasks.append(signed_request("GET", "/v5/market/tickers", {
-                "category": "linear",
-                "symbol": "BTCUSDT"
-            }))
-            
-            # All alt symbols
-            for symbol in alt_symbols:
-                tasks.append(signed_request("GET", "/v5/market/tickers", {
-                    "category": "linear",
-                    "symbol": symbol
-                }))
-            
-            # Execute all requests concurrently
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # Process BTC data with proper error handling
-            btc_resp = results[0]
-            btc_perf_24h = 0
-            
-            if isinstance(btc_resp, dict) and btc_resp.get("retCode") == 0:
-                result_data = btc_resp.get("result", {})
-                ticker_list = result_data.get("list", [])
-                
-                # ADDITIONAL FIX: Check if list is not empty before accessing index
-                if ticker_list and len(ticker_list) > 0:
-                    btc_data = ticker_list[0]
-                    # FIX #1: Remove * 100 - price24hPcnt is already a percentage
-                    btc_perf_24h = float(btc_data.get("price24hPcnt", 0))
-                else:
-                    log(f"⚠️ Empty ticker list for BTCUSDT", level="WARNING")
-                
-            outperforming_24h = 0
-            strong_performers = 0
-            total_checked = 0
-            
-            # Process alt data with improved error handling
-            for i, symbol in enumerate(alt_symbols):
-                try:
-                    ticker_resp = results[i + 1]  # Skip BTC result
-                    
-                    if (isinstance(ticker_resp, dict) and 
-                        ticker_resp.get("retCode") == 0):
-                        
-                        result_data = ticker_resp.get("result", {})
-                        ticker_list = result_data.get("list", [])
-                        
-                        # ADDITIONAL FIX: Check if list is not empty before accessing index
-                        if ticker_list and len(ticker_list) > 0:
-                            ticker = ticker_list[0]
-                            # FIX #1: Remove * 100 - price24hPcnt is already a percentage
-                            alt_perf_24h = float(ticker.get("price24hPcnt", 0))
-                            
-                            total_checked += 1
-                            
-                            # Check if outperforming BTC
-                            if alt_perf_24h > btc_perf_24h + 2:  # 2% outperformance threshold
-                                outperforming_24h += 1
-                                
-                            # Check for strong performers (>10% gain)
-                            if alt_perf_24h > 10:
-                                strong_performers += 1
-                        else:
-                            log(f"⚠️ Empty ticker list for {symbol}", level="WARNING")
-                            
-                except Exception as e:
-                    log(f"❌ Error processing {symbol}: {e}", level="WARNING")
-                    continue
-            
-            # Calculate ratios
-            outperform_ratio = outperforming_24h / total_checked if total_checked > 0 else 0
-            strong_ratio = strong_performers / total_checked if total_checked > 0 else 0
-            
-            # Determine season based on performance
-            if outperform_ratio > 0.7 and strong_ratio > 0.3:
-                return {'season': 'strong_altseason', 'weight': 2.0, 'ratio': outperform_ratio}
-            elif outperform_ratio > 0.6:
-                return {'season': 'altseason', 'weight': 1.5, 'ratio': outperform_ratio}
-            elif outperform_ratio < 0.3:
-                return {'season': 'btc_season', 'weight': 1.5, 'ratio': outperform_ratio}
-            else:
-                return {'season': 'neutral', 'weight': 1.0, 'ratio': outperform_ratio}
-                
-        except Exception as e:
-            log(f"❌ Error analyzing alt performance: {e}", level="ERROR")
-            return {'season': 'neutral', 'weight': 0.5, 'ratio': 0.5}
+        if breakout_prob > 0.7:
+            return "breakout_imminent"
+        elif trend in ["uptrend", "downtrend"] and strength > 0.7:
+            return "trending"
+        elif trend == "ranging" and strength > 0.6:
+            return "consolidation"
+        elif strength < 0.4:
+            return "accumulation"
+        else:
+            return "neutral"
     
-    async def _analyze_volume_distribution(self):
-        """
-        Analyze if volume is shifting to altcoins
-        FIX #5: Use turnover24h (quote-value) for proper USD comparison
-        ADDITIONAL FIX: Handle empty API response lists properly
-        """
-        
-        try:
-            # Get volume for BTC and major alts
-            symbols = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"]
-            
-            # FIX #3: Use concurrent requests
-            tasks = [
-                signed_request("GET", "/v5/market/tickers", {
-                    "category": "linear",
-                    "symbol": symbol
-                }) for symbol in symbols
-            ]
-            
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            volumes = {}
-            
-            for i, symbol in enumerate(symbols):
-                try:
-                    ticker_resp = results[i]
-                    
-                    if (isinstance(ticker_resp, dict) and 
-                        ticker_resp.get("retCode") == 0):
-                        
-                        result_data = ticker_resp.get("result", {})
-                        ticker_list = result_data.get("list", [])
-                        
-                        # ADDITIONAL FIX: Check if list is not empty before accessing index
-                        if ticker_list and len(ticker_list) > 0:
-                            ticker = ticker_list[0]
-                            
-                            # FIX #5: Use turnover24h for USD-quoted volume instead of volume24h
-                            turnover_24h = float(ticker.get("turnover24h", 0))
-                            volumes[symbol] = turnover_24h
-                        else:
-                            log(f"⚠️ Empty ticker list for {symbol} in volume analysis", level="WARNING")
-                        
-                except Exception as e:
-                    log(f"❌ Error processing volume for {symbol}: {e}", level="WARNING")
-                    continue
-            
-            if not volumes or "BTCUSDT" not in volumes:
-                return {'season': 'neutral', 'weight': 0.5}
-            
-            # Calculate BTC volume dominance
-            total_volume = sum(volumes.values())
-            btc_volume = volumes["BTCUSDT"]
-            btc_dominance = btc_volume / total_volume if total_volume > 0 else 0
-            
-            # Lower BTC dominance = altseason
-            if btc_dominance < 0.3:  # BTC less than 30% of volume
-                return {'season': 'strong_altseason', 'weight': 1.5, 'btc_dominance': btc_dominance}
-            elif btc_dominance < 0.4:
-                return {'season': 'altseason', 'weight': 1.2, 'btc_dominance': btc_dominance}
-            elif btc_dominance > 0.6:
-                return {'season': 'btc_season', 'weight': 1.2, 'btc_dominance': btc_dominance}
-            else:
-                return {'season': 'neutral', 'weight': 0.8, 'btc_dominance': btc_dominance}
-                
-        except Exception as e:
-            log(f"❌ Error analyzing volume distribution: {e}", level="ERROR")
-            return {'season': 'neutral', 'weight': 0.5}
-    
-    async def _analyze_momentum_shift(self):
-        """
-        Check momentum shift between BTC and alts
-        FIX #6: Expand beyond just ETH-BTC to include multiple alts
-        """
-        
-        try:
-            # FIX #6: Use basket of major alts instead of just ETH
-            alt_symbols = ["ETHUSDT", "SOLUSDT", "BNBUSDT"]
-            period = 14  # 14 day momentum
-            
-            # Get candles concurrently
-            tasks = []
-            tasks.append(signed_request("GET", "/v5/market/kline", {
-                "category": "linear",
-                "symbol": "BTCUSDT",
-                "interval": "D",
-                "limit": str(period)
-            }))
-            
-            for symbol in alt_symbols:
-                tasks.append(signed_request("GET", "/v5/market/kline", {
-                    "category": "linear",
-                    "symbol": symbol,
-                    "interval": "D",
-                    "limit": str(period)
-                }))
-            
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # Process BTC momentum
-            btc_resp = results[0]
-            btc_momentum = 0
-            
-            if (isinstance(btc_resp, dict) and 
-                btc_resp.get("retCode") == 0):
-                candles = btc_resp.get("result", {}).get("list", [])
-                if len(candles) >= period:
-                    closes = [float(c[4]) for c in candles]
-                    btc_momentum = ((closes[-1] - closes[0]) / closes[0]) * 100
-            
-            # Process alt momentum (average of basket)
-            alt_momentums = []
-            for i, symbol in enumerate(alt_symbols):
-                try:
-                    alt_resp = results[i + 1]
-                    
-                    if (isinstance(alt_resp, dict) and 
-                        alt_resp.get("retCode") == 0):
-                        candles = alt_resp.get("result", {}).get("list", [])
-                        if len(candles) >= period:
-                            closes = [float(c[4]) for c in candles]
-                            alt_momentum = ((closes[-1] - closes[0]) / closes[0]) * 100
-                            alt_momentums.append(alt_momentum)
-                            
-                except Exception as e:
-                    log(f"❌ Error processing momentum for {symbol}: {e}", level="WARNING")
-                    continue
-            
-            # Average alt momentum
-            avg_alt_momentum = sum(alt_momentums) / len(alt_momentums) if alt_momentums else 0
-            
-            # Compare momentum
-            momentum_diff = avg_alt_momentum - btc_momentum
-            
-            if momentum_diff > 3:  # Alts momentum 3% higher
-                return {'season': 'altseason', 'weight': 1.3, 'momentum_diff': momentum_diff}
-            elif momentum_diff < -3:  # BTC momentum 3% higher
-                return {'season': 'btc_season', 'weight': 1.3, 'momentum_diff': momentum_diff}
-            else:
-                return {'season': 'neutral', 'weight': 0.7, 'momentum_diff': momentum_diff}
-                
-        except Exception as e:
-            log(f"❌ Error analyzing momentum shift: {e}", level="ERROR")
-            return {'season': 'neutral', 'weight': 0.5}
-    
-    async def _analyze_market_breadth(self):
-        """
-        Check how many alts are in uptrend
-        FIX #7: Use proper 10-day window as stated in comment
-        """
-        
-        try:
-            alt_symbols = ["ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", 
-                          "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "MATICUSDT"]
-            
-            # FIX #3: Use concurrent requests
-            tasks = []
-            for symbol in alt_symbols:
-                tasks.append(signed_request("GET", "/v5/market/kline", {
-                    "category": "linear",
-                    "symbol": symbol,
-                    "interval": "D",
-                    "limit": "10"  # FIX #7: Use 10 days as comment states
-                }))
-            
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            uptrending = 0
-            downtrending = 0
-            
-            for i, symbol in enumerate(alt_symbols):
-                try:
-                    kline_resp = results[i]
-                    
-                    if (isinstance(kline_resp, dict) and 
-                        kline_resp.get("retCode") == 0):
-                        candles = kline_resp.get("result", {}).get("list", [])
-                        if len(candles) >= 10:
-                            # FIX #7: Use proper 10-day window (slice [:10] not [:5])
-                            closes = [float(c[4]) for c in candles[:10]]
-                            closes.reverse()  # oldest → newest
-                            
-                            # Check for 5% up in last 10 days as stated in comment
-                            if closes[-1] > closes[0] * 1.05:  # 5% up
-                                uptrending += 1
-                            elif closes[-1] < closes[0] * 0.95:  # 5% down
-                                downtrending += 1
-                                
-                except Exception as e:
-                    log(f"❌ Error processing breadth for {symbol}: {e}", level="WARNING")
-                    continue
-            
-            total = uptrending + downtrending
-            
-            if total == 0:
-                return {'season': 'neutral', 'weight': 0.5}
-            
-            uptrend_ratio = uptrending / total
-            
-            if uptrend_ratio > 0.7:
-                return {'season': 'altseason', 'weight': 1.2, 'uptrend_ratio': uptrend_ratio}
-            elif uptrend_ratio < 0.3:
-                return {'season': 'btc_season', 'weight': 1.2, 'uptrend_ratio': uptrend_ratio}
-            else:
-                return {'season': 'neutral', 'weight': 0.8, 'uptrend_ratio': uptrend_ratio}
-                
-        except Exception as e:
-            log(f"❌ Error analyzing market breadth: {e}", level="ERROR")
-            return {'season': 'neutral', 'weight': 0.5}
+    def _get_default_structure(self) -> Dict[str, Any]:
+        """Return default structure analysis"""
+        return {
+            "structure": "neutral",
+            "strength": 0.5,
+            "confidence": 30,
+            "key_levels": {"resistance": [], "support": [], "key_level_strength": 0},
+            "breakout_probability": {"probability": 0.5, "direction": "neutral"},
+            "timeframe_analysis": {},
+            "market_phase": "neutral"
+        }
 
 
-class BTCTrendAnalyzer:
-    """
-    Enhanced BTC trend analyzer with thread-safe caching
-    FIXED: Complete implementation with all required methods
-    """
+class EnhancedAltseasonDetector:
+    """Enhanced altseason detection with broader analysis"""
     
     def __init__(self):
-        self.last_trend = "neutral"
-        self.trend_strength = 0
-        self.confidence = 0
-        self.timeframes = ['15', '1H', '4H', '1D']
-        # FIX #10: Add thread-safe lock for trend cache
-        self._trend_lock = asyncio.Lock()
+        self.monitored_symbols = [
+            # Large caps
+            "ETHUSDT", "BNBUSDT", "XRPUSDT", "SOLUSDT", "ADAUSDT",
+            # Mid caps
+            "DOGEUSDT", "AVAXUSDT", "MATICUSDT", "DOTUSDT", "LINKUSDT",
+            "UNIUSDT", "ATOMUSDT", "NEARUSDT", "FTMUSDT", "SANDUSDT",
+            # Small caps / trending
+            "APTUSDT", "OPUSDT", "ARBUSDT", "SUIUSDT", "SEIUSDT",
+            "INJUSDT", "TIAUSDT", "STRKUSDT", "WUSDT", "PENDLEUSDT",
+            # DeFi tokens
+            "AAVEUSDT", "MKRUSDT", "COMPUSDT", "CRVUSDT", "SUSHIUSDT",
+            # Layer 1s
+            "ALGOUSDT", "HBARUSDT", "IOTAUSDT", "VETUSDT", "XLMUSDT",
+            # Gaming/NFT
+            "AXSUSDT", "MANAUSDT", "CHZUSDT", "ENJUSDT", "GALAUSDT"
+        ]
+        self.btc_dominance_history = deque(maxlen=30)
+        self.alt_performance_data = {}
+        self.market_cap_data = {}
         
-    async def _fetch_btc_candles(self, interval, limit=100):
-        """
-        Fetch BTC candles for analysis
-        FIX #8: Adopt consistent candle ordering (oldest→newest)
-        """
+    async def detect_enhanced_altseason(self) -> Dict[str, Any]:
+        """Enhanced altseason detection with comprehensive analysis"""
         try:
+            # 1. Alt performance analysis (expanded sample)
+            alt_performance = await self._analyze_expanded_alt_performance()
+            
+            # 2. Market cap flow analysis
+            mcap_analysis = await self._analyze_market_cap_flows()
+            
+            # 3. Sector rotation analysis
+            sector_analysis = await self._analyze_sector_rotation()
+            
+            # 4. Social sentiment analysis
+            social_sentiment = await self._analyze_social_sentiment()
+            
+            # 5. Institutional flow analysis
+            institutional_flow = await self._analyze_institutional_flows()
+            
+            # Combine all signals
+            altseason_score = self._calculate_altseason_score({
+                "alt_performance": alt_performance,
+                "market_cap": mcap_analysis,
+                "sector_rotation": sector_analysis,
+                "social_sentiment": social_sentiment,
+                "institutional_flow": institutional_flow
+            })
+            
+            return altseason_score
+            
+        except Exception as e:
+            log(f"❌ Error in enhanced altseason detection: {e}", level="ERROR")
+            return self._get_default_altseason()
+    
+    async def _analyze_expanded_alt_performance(self) -> Dict[str, Any]:
+        """Analyze performance across expanded altcoin universe"""
+        try:
+            # Get BTC performance
+            btc_response = await signed_request("GET", "/v5/market/tickers", {
+                "category": "linear",
+                "symbol": "BTCUSDT"
+            })
+            
+            if btc_response.get("retCode") != 0:
+                return {"outperforming_ratio": 0.5, "avg_outperformance": 0, "strength": 0.5}
+            
+            btc_change = float(btc_response["result"]["list"][0]["price24hPcnt"])
+            
+            # Get alt performance in batches
+            outperforming_alts = 0
+            total_alts = 0
+            performance_deltas = []
+            
+            # Process in batches to avoid rate limits
+            batch_size = 10
+            for i in range(0, len(self.monitored_symbols), batch_size):
+                batch = self.monitored_symbols[i:i+batch_size]
+                
+                for symbol in batch:
+                    try:
+                        response = await signed_request("GET", "/v5/market/tickers", {
+                            "category": "linear",
+                            "symbol": symbol
+                        })
+                        
+                        if response.get("retCode") == 0 and response["result"]["list"]:
+                            alt_change = float(response["result"]["list"][0]["price24hPcnt"])
+                            performance_delta = alt_change - btc_change
+                            
+                            performance_deltas.append(performance_delta)
+                            total_alts += 1
+                            
+                            if performance_delta > 0:
+                                outperforming_alts += 1
+                                
+                    except Exception as e:
+                        log(f"❌ Error getting {symbol} performance: {e}", level="DEBUG")
+                        continue
+                
+                # Rate limit protection
+                await asyncio.sleep(0.1)
+            
+            if total_alts == 0:
+                return {"outperforming_ratio": 0.5, "avg_outperformance": 0, "strength": 0.5}
+            
+            outperforming_ratio = outperforming_alts / total_alts
+            avg_outperformance = np.mean(performance_deltas)
+            
+            # Calculate strength
+            strength = min(outperforming_ratio * 2, 1.0) if outperforming_ratio > 0.6 else outperforming_ratio
+            
+            return {
+                "outperforming_ratio": outperforming_ratio,
+                "avg_outperformance": avg_outperformance,
+                "strength": strength,
+                "total_analyzed": total_alts,
+                "btc_change": btc_change
+            }
+            
+        except Exception as e:
+            log(f"❌ Error analyzing alt performance: {e}", level="ERROR")
+            return {"outperforming_ratio": 0.5, "avg_outperformance": 0, "strength": 0.5}
+    
+    async def _analyze_market_cap_flows(self) -> Dict[str, Any]:
+        """Analyze market cap flows between BTC and alts"""
+        try:
+            # This would require CoinGecko or similar API for market cap data
+            # For now, simulate based on volume and price action
+            
+            # Get volume data for BTC vs alt leaders
+            btc_vol_response = await signed_request("GET", "/v5/market/tickers", {
+                "category": "linear",
+                "symbol": "BTCUSDT"
+            })
+            
+            alt_leaders = ["ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"]
+            alt_volumes = []
+            
+            for symbol in alt_leaders:
+                try:
+                    response = await signed_request("GET", "/v5/market/tickers", {
+                        "category": "linear",
+                        "symbol": symbol
+                    })
+                    
+                    if response.get("retCode") == 0 and response["result"]["list"]:
+                        volume = float(response["result"]["list"][0]["volume24h"])
+                        alt_volumes.append(volume)
+                        
+                except Exception:
+                    continue
+                
+                await asyncio.sleep(0.05)
+            
+            if not alt_volumes or btc_vol_response.get("retCode") != 0:
+                return {"flow_direction": "neutral", "strength": 0.5}
+            
+            btc_volume = float(btc_vol_response["result"]["list"][0]["volume24h"])
+            total_alt_volume = sum(alt_volumes)
+            
+            # Calculate flow ratio
+            flow_ratio = total_alt_volume / (btc_volume + total_alt_volume) if btc_volume > 0 else 0.5
+            
+            if flow_ratio > 0.6:
+                flow_direction = "into_alts"
+                strength = min(flow_ratio * 1.5, 1.0)
+            elif flow_ratio < 0.3:
+                flow_direction = "into_btc"
+                strength = min((1 - flow_ratio) * 1.5, 1.0)
+            else:
+                flow_direction = "neutral"
+                strength = 0.5
+            
+            return {
+                "flow_direction": flow_direction,
+                "strength": strength,
+                "flow_ratio": flow_ratio,
+                "btc_volume": btc_volume,
+                "alt_volume": total_alt_volume
+            }
+            
+        except Exception as e:
+            log(f"❌ Error analyzing market cap flows: {e}", level="ERROR")
+            return {"flow_direction": "neutral", "strength": 0.5}
+    
+    async def _analyze_sector_rotation(self) -> Dict[str, Any]:
+        """Analyze sector rotation patterns"""
+        try:
+            sectors = {
+                "defi": ["UNIUSDT", "AAVEUSDT", "MKRUSDT", "COMPUSDT", "CRVUSDT"],
+                "layer1": ["ETHUSDT", "SOLUSDT", "ADAUSDT", "DOTUSDT", "AVAXUSDT"],
+                "gaming": ["AXSUSDT", "MANAUSDT", "SANDUSDT", "ENJUSDT", "GALAUSDT"],
+                "infrastructure": ["LINKUSDT", "MATICUSDT", "ATOMUSDT", "NEARUSDT", "FTMUSDT"]
+            }
+            
+            sector_performance = {}
+            
+            for sector, symbols in sectors.items():
+                sector_changes = []
+                
+                for symbol in symbols:
+                    try:
+                        response = await signed_request("GET", "/v5/market/tickers", {
+                            "category": "linear",
+                            "symbol": symbol
+                        })
+                        
+                        if response.get("retCode") == 0 and response["result"]["list"]:
+                            change = float(response["result"]["list"][0]["price24hPcnt"])
+                            sector_changes.append(change)
+                            
+                    except Exception:
+                        continue
+                    
+                    await asyncio.sleep(0.05)
+                
+                if sector_changes:
+                    sector_performance[sector] = {
+                        "avg_change": np.mean(sector_changes),
+                        "positive_ratio": sum(1 for c in sector_changes if c > 0) / len(sector_changes)
+                    }
+            
+            # Find leading sector
+            if sector_performance:
+                leading_sector = max(sector_performance.items(), 
+                                   key=lambda x: x[1]["avg_change"])[0]
+                
+                leading_performance = sector_performance[leading_sector]["avg_change"]
+                rotation_strength = min(abs(leading_performance) / 5, 1.0)  # Normalize to 5% max
+                
+                return {
+                    "leading_sector": leading_sector,
+                    "rotation_strength": rotation_strength,
+                    "sector_data": sector_performance
+                }
+            
+            return {"leading_sector": "none", "rotation_strength": 0.5, "sector_data": {}}
+            
+        except Exception as e:
+            log(f"❌ Error analyzing sector rotation: {e}", level="ERROR")
+            return {"leading_sector": "none", "rotation_strength": 0.5, "sector_data": {}}
+    
+    async def _analyze_social_sentiment(self) -> Dict[str, Any]:
+        """Analyze social sentiment indicators"""
+        try:
+            # This would integrate with Fear & Greed Index, social APIs, etc.
+            # For now, simulate based on market behavior patterns
+            
+            # Get volatility as sentiment proxy
+            btc_response = await signed_request("GET", "/v5/market/kline", {
+                "category": "linear",
+                "symbol": "BTCUSDT",
+                "interval": "1",
+                "limit": 100
+            })
+            
+            if btc_response.get("retCode") != 0:
+                return {"sentiment": "neutral", "strength": 0.5}
+            
+            candles = btc_response["result"]["list"]
+            price_changes = []
+            
+            for candle in candles:
+                open_price = float(candle[1])
+                close_price = float(candle[4])
+                change = (close_price - open_price) / open_price
+                price_changes.append(change)
+            
+            # Calculate sentiment metrics
+            volatility = np.std(price_changes)
+            trend = np.mean(price_changes)
+            
+            # Sentiment scoring
+            if volatility > 0.02:  # High volatility
+                if trend > 0:
+                    sentiment = "euphoric"
+                    strength = min(volatility * 25, 1.0)
+                else:
+                    sentiment = "fearful"
+                    strength = min(volatility * 25, 1.0)
+            elif abs(trend) < 0.005:  # Low movement
+                sentiment = "apathetic"
+                strength = 0.3
+            elif trend > 0:
+                sentiment = "optimistic"
+                strength = min(abs(trend) * 100, 0.8)
+            else:
+                sentiment = "pessimistic"
+                strength = min(abs(trend) * 100, 0.8)
+            
+            return {
+                "sentiment": sentiment,
+                "strength": strength,
+                "volatility": volatility,
+                "trend": trend
+            }
+            
+        except Exception as e:
+            log(f"❌ Error analyzing social sentiment: {e}", level="ERROR")
+            return {"sentiment": "neutral", "strength": 0.5}
+    
+    async def _analyze_institutional_flows(self) -> Dict[str, Any]:
+        """Analyze institutional flow patterns"""
+        try:
+            # Analyze large transaction patterns and order book depth
+            # This is a simplified version - would need access to institutional data
+            
+            large_cap_symbols = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"]
+            institutional_signals = []
+            
+            for symbol in large_cap_symbols:
+                try:
+                    # Get recent trades to analyze for large transactions
+                    response = await signed_request("GET", "/v5/market/recent-trade", {
+                        "category": "linear",
+                        "symbol": symbol,
+                        "limit": 100
+                    })
+                    
+                    if response.get("retCode") == 0:
+                        trades = response["result"]["list"]
+                        
+                        # Analyze trade sizes
+                        trade_sizes = [float(trade["size"]) for trade in trades]
+                        avg_size = np.mean(trade_sizes)
+                        large_trades = [size for size in trade_sizes if size > avg_size * 3]
+                        
+                        # Calculate institutional activity score
+                        if trade_sizes:
+                            large_trade_ratio = len(large_trades) / len(trade_sizes)
+                            institutional_signals.append(large_trade_ratio)
+                        
+                except Exception:
+                    continue
+                
+                await asyncio.sleep(0.1)
+            
+            if institutional_signals:
+                avg_institutional_activity = np.mean(institutional_signals)
+                
+                if avg_institutional_activity > 0.15:
+                    flow_type = "institutional_accumulation"
+                    strength = min(avg_institutional_activity * 4, 1.0)
+                elif avg_institutional_activity < 0.05:
+                    flow_type = "retail_dominated"
+                    strength = 0.4
+                else:
+                    flow_type = "mixed_flow"
+                    strength = 0.6
+            else:
+                flow_type = "unknown"
+                strength = 0.5
+            
+            return {
+                "flow_type": flow_type,
+                "strength": strength,
+                "institutional_activity": avg_institutional_activity if institutional_signals else 0
+            }
+            
+        except Exception as e:
+            log(f"❌ Error analyzing institutional flows: {e}", level="ERROR")
+            return {"flow_type": "unknown", "strength": 0.5}
+    
+    def _calculate_altseason_score(self, analyses: Dict) -> Dict[str, Any]:
+        """Calculate overall altseason score from all analyses"""
+        try:
+            # Weighted scoring system
+            weights = {
+                "alt_performance": 0.35,
+                "market_cap": 0.25,
+                "sector_rotation": 0.15,
+                "social_sentiment": 0.15,
+                "institutional_flow": 0.10
+            }
+            
+            total_score = 0
+            total_weight = 0
+            details = {}
+            
+            for analysis_type, analysis_data in analyses.items():
+                if analysis_type in weights:
+                    weight = weights[analysis_type]
+                    strength = analysis_data.get("strength", 0.5)
+                    
+                    total_score += strength * weight
+                    total_weight += weight
+                    details[analysis_type] = analysis_data
+            
+            final_score = total_score / total_weight if total_weight > 0 else 0.5
+            
+            # Determine altseason status
+            if final_score >= 0.75:
+                season = "strong_altseason"
+                is_altseason = True
+            elif final_score >= 0.6:
+                season = "altseason"
+                is_altseason = True
+            elif final_score <= 0.3:
+                season = "btc_season"
+                is_altseason = False
+            else:
+                season = "neutral"
+                is_altseason = False
+            
+            return {
+                "is_altseason": is_altseason,
+                "season": season,
+                "strength": final_score,
+                "confidence": min(final_score * 100 + 20, 95),
+                "details": details,
+                "components": {
+                    "alt_outperformance": analyses["alt_performance"].get("outperforming_ratio", 0.5),
+                    "market_cap_flow": analyses["market_cap"].get("flow_ratio", 0.5),
+                    "sector_strength": analyses["sector_rotation"].get("rotation_strength", 0.5),
+                    "sentiment_score": analyses["social_sentiment"].get("strength", 0.5),
+                    "institutional_score": analyses["institutional_flow"].get("strength", 0.5)
+                }
+            }
+            
+        except Exception as e:
+            log(f"❌ Error calculating altseason score: {e}", level="ERROR")
+            return self._get_default_altseason()
+    
+    def _get_default_altseason(self) -> Dict[str, Any]:
+        """Return default altseason analysis"""
+        return {
+            "is_altseason": False,
+            "season": "neutral",
+            "strength": 0.5,
+            "confidence": 50,
+            "details": {},
+            "components": {}
+        }
+
+
+class MultiSourceSentimentAnalyzer:
+    """Multi-source sentiment analysis aggregator"""
+    
+    def __init__(self):
+        self.sentiment_sources = {
+            "fear_greed": {"weight": 0.3, "last_value": 50},
+            "social_volume": {"weight": 0.2, "last_value": 0.5},
+            "news_sentiment": {"weight": 0.25, "last_value": 0.5},
+            "options_flow": {"weight": 0.25, "last_value": 0.5}
+        }
+    
+    async def get_aggregated_sentiment(self) -> Dict[str, Any]:
+        """Get aggregated sentiment from multiple sources"""
+        try:
+            sentiment_scores = {}
+            
+            # 1. Fear & Greed Index (simulated)
+            fear_greed = await self._get_fear_greed_index()
+            sentiment_scores["fear_greed"] = fear_greed
+            
+            # 2. Social volume analysis
+            social_volume = await self._analyze_social_volume()
+            sentiment_scores["social_volume"] = social_volume
+            
+            # 3. News sentiment (simulated)
+            news_sentiment = await self._analyze_news_sentiment()
+            sentiment_scores["news_sentiment"] = news_sentiment
+            
+            # 4. Options flow analysis (simulated)
+            options_flow = await self._analyze_options_sentiment()
+            sentiment_scores["options_flow"] = options_flow
+            
+            # Aggregate all scores
+            aggregated = self._aggregate_sentiment_scores(sentiment_scores)
+            
+            return aggregated
+            
+        except Exception as e:
+            log(f"❌ Error getting aggregated sentiment: {e}", level="ERROR")
+            return self._get_default_sentiment()
+    
+    async def _get_fear_greed_index(self) -> Dict[str, Any]:
+        """Get Fear & Greed Index (simulated based on volatility)"""
+        try:
+            # Get BTC volatility as proxy for fear/greed
             response = await signed_request("GET", "/v5/market/kline", {
                 "category": "linear",
                 "symbol": "BTCUSDT",
-                "interval": interval,
-                "limit": str(limit)
+                "interval": "60",
+                "limit": 24
             })
             
-            if response.get("retCode") == 0:
-                candles = response.get("result", {}).get("list", [])
-                # FIX #8: Ensure consistent oldest→newest ordering
-                candles.reverse()  # Bybit returns newest first, we want oldest first
-                return candles
+            if response.get("retCode") != 0:
+                return {"value": 50, "sentiment": "neutral", "strength": 0.5}
+            
+            candles = response["result"]["list"]
+            price_changes = []
+            
+            for candle in candles:
+                open_price = float(candle[1])
+                close_price = float(candle[4])
+                change = abs((close_price - open_price) / open_price)
+                price_changes.append(change)
+            
+            volatility = np.mean(price_changes)
+            
+            # Convert volatility to fear/greed score
+            if volatility > 0.03:  # High volatility
+                fg_value = 25  # Fear
+                sentiment = "extreme_fear"
+            elif volatility > 0.02:
+                fg_value = 40
+                sentiment = "fear"
+            elif volatility < 0.005:  # Low volatility
+                fg_value = 75  # Greed
+                sentiment = "greed"
             else:
-                log(f"❌ Failed to fetch BTC candles: {response.get('retMsg', 'Unknown error')}")
-                return []
-                
+                fg_value = 50
+                sentiment = "neutral"
+            
+            return {
+                "value": fg_value,
+                "sentiment": sentiment,
+                "strength": min(abs(fg_value - 50) / 50, 1.0)
+            }
+            
         except Exception as e:
-            log(f"❌ Error fetching BTC candles: {e}", level="ERROR")
-            return []
+            log(f"❌ Error getting fear & greed index: {e}", level="ERROR")
+            return {"value": 50, "sentiment": "neutral", "strength": 0.5}
     
-    def _calculate_ema(self, prices, period):
-        """
-        Calculate EMA with proper initialization
-        FIX #9: Use SMA of first period prices as initial EMA value
-        """
-        if len(prices) < period:
-            return prices[-1] if prices else 0
-        
-        # FIX #9: Initialize EMA with SMA of first period prices
-        ema = np.mean(prices[:period])
-        multiplier = 2 / (period + 1)
-        
-        # Start calculation from period index
-        for price in prices[period:]:
-            ema = (price * multiplier) + (ema * (1 - multiplier))
-        
-        return ema
-    
-    def _analyze_moving_averages(self, candles_by_tf):
-        """Analyze moving averages across timeframes"""
-        signals = []
-        
-        for tf in ['15', '1H', '4H']:
-            if tf not in candles_by_tf or len(candles_by_tf[tf]) < 50:
-                continue
-                
-            candles = candles_by_tf[tf]
-            closes = [float(c[4]) for c in candles]
+    async def _analyze_social_volume(self) -> Dict[str, Any]:
+        """Analyze social media volume patterns"""
+        try:
+            # This would integrate with Twitter/Reddit APIs
+            # For now, simulate based on trading volume
             
-            # Calculate EMAs
-            ema_20 = self._calculate_ema(closes, 20)
-            ema_50 = self._calculate_ema(closes, 50)
-            current_price = closes[-1]
+            response = await signed_request("GET", "/v5/market/tickers", {
+                "category": "linear",
+                "symbol": "BTCUSDT"
+            })
             
-            # Determine trend
-            if current_price > ema_20 > ema_50:
-                signals.append(('uptrend', 1.5 if tf in ['4H'] else 1.0))
-            elif current_price < ema_20 < ema_50:
-                signals.append(('downtrend', 1.5 if tf in ['4H'] else 1.0))
+            if response.get("retCode") != 0:
+                return {"volume_trend": "neutral", "strength": 0.5}
+            
+            current_volume = float(response["result"]["list"][0]["volume24h"])
+            
+            # Get historical volume for comparison
+            hist_response = await signed_request("GET", "/v5/market/kline", {
+                "category": "linear", 
+                "symbol": "BTCUSDT",
+                "interval": "240",
+                "limit": 7
+            })
+            
+            if hist_response.get("retCode") != 0:
+                return {"volume_trend": "neutral", "strength": 0.5}
+            
+            hist_volumes = [float(candle[5]) for candle in hist_response["result"]["list"]]
+            avg_volume = np.mean(hist_volumes)
+            
+            volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1
+            
+            if volume_ratio > 1.5:
+                volume_trend = "high_interest"
+                strength = min((volume_ratio - 1) / 2, 1.0)
+            elif volume_ratio < 0.7:
+                volume_trend = "low_interest"
+                strength = min((1 - volume_ratio) / 0.5, 1.0)
             else:
-                signals.append(('neutral', 0.8))
+                volume_trend = "normal"
+                strength = 0.5
+            
+            return {
+                "volume_trend": volume_trend,
+                "strength": strength,
+                "volume_ratio": volume_ratio
+            }
+            
+        except Exception as e:
+            log(f"❌ Error analyzing social volume: {e}", level="ERROR")
+            return {"volume_trend": "neutral", "strength": 0.5}
+    
+    async def _analyze_news_sentiment(self) -> Dict[str, Any]:
+        """Analyze news sentiment (simulated)"""
+        try:
+            # This would integrate with news APIs
+            # For now, simulate based on price momentum
+            
+            response = await signed_request("GET", "/v5/market/kline", {
+                "category": "linear",
+                "symbol": "BTCUSDT", 
+                "interval": "240",
+                "limit": 10
+            })
+            
+            if response.get("retCode") != 0:
+                return {"sentiment": "neutral", "strength": 0.5}
+            
+            candles = response["result"]["list"]
+            price_trend = (float(candles[0][4]) - float(candles[-1][4])) / float(candles[-1][4])
+            
+            if price_trend > 0.05:
+                sentiment = "very_positive"
+                strength = min(price_trend * 10, 1.0)
+            elif price_trend > 0.02:
+                sentiment = "positive"
+                strength = min(price_trend * 15, 0.8)
+            elif price_trend < -0.05:
+                sentiment = "very_negative"
+                strength = min(abs(price_trend) * 10, 1.0)
+            elif price_trend < -0.02:
+                sentiment = "negative"
+                strength = min(abs(price_trend) * 15, 0.8)
+            else:
+                sentiment = "neutral"
+                strength = 0.5
+            
+            return {
+                "sentiment": sentiment,
+                "strength": strength,
+                "price_trend": price_trend
+            }
+            
+        except Exception as e:
+            log(f"❌ Error analyzing news sentiment: {e}", level="ERROR")
+            return {"sentiment": "neutral", "strength": 0.5}
+    
+    async def _analyze_options_sentiment(self) -> Dict[str, Any]:
+        """Analyze options sentiment (simulated)"""
+        try:
+            # This would analyze put/call ratios, open interest, etc.
+            # For now, simulate based on volatility patterns
+            
+            response = await signed_request("GET", "/v5/market/kline", {
+                "category": "linear",
+                "symbol": "BTCUSDT",
+                "interval": "60",
+                "limit": 48
+            })
+            
+            if response.get("retCode") != 0:
+                return {"options_sentiment": "neutral", "strength": 0.5}
+            
+            candles = response["result"]["list"]
+            
+            # Calculate implied volatility proxy
+            price_ranges = []
+            for candle in candles:
+                high = float(candle[2])
+                low = float(candle[3])
+                close = float(candle[4])
+                price_range = (high - low) / close if close > 0 else 0
+                price_ranges.append(price_range)
+            
+            avg_range = np.mean(price_ranges)
+            recent_range = np.mean(price_ranges[-12:])  # Last 12 hours
+            
+            volatility_trend = recent_range / avg_range if avg_range > 0 else 1
+            
+            if volatility_trend > 1.3:
+                options_sentiment = "high_vol_expected"
+                strength = min((volatility_trend - 1) / 1, 1.0)
+            elif volatility_trend < 0.7:
+                options_sentiment = "low_vol_expected"
+                strength = min((1 - volatility_trend) / 0.5, 1.0)
+            else:
+                options_sentiment = "stable_vol"
+                strength = 0.5
+            
+            return {
+                "options_sentiment": options_sentiment,
+                "strength": strength,
+                "volatility_trend": volatility_trend
+            }
+            
+        except Exception as e:
+            log(f"❌ Error analyzing options sentiment: {e}", level="ERROR")
+            return {"options_sentiment": "neutral", "strength": 0.5}
+    
+    def _aggregate_sentiment_scores(self, sentiment_scores: Dict) -> Dict[str, Any]:
+        """Aggregate sentiment scores from all sources"""
+        try:
+            total_score = 0
+            total_weight = 0
+            component_details = {}
+            
+            for source, data in sentiment_scores.items():
+                if source in self.sentiment_sources:
+                    weight = self.sentiment_sources[source]["weight"]
+                    strength = data.get("strength", 0.5)
+                    
+                    total_score += strength * weight
+                    total_weight += weight
+                    component_details[source] = data
+            
+            final_score = total_score / total_weight if total_weight > 0 else 0.5
+            
+            # Determine overall sentiment
+            if final_score >= 0.8:
+                overall_sentiment = "extremely_bullish"
+            elif final_score >= 0.65:
+                overall_sentiment = "bullish"
+            elif final_score >= 0.35:
+                overall_sentiment = "neutral"
+            elif final_score >= 0.2:
+                overall_sentiment = "bearish"
+            else:
+                overall_sentiment = "extremely_bearish"
+            
+            return {
+                "overall_sentiment": overall_sentiment,
+                "sentiment_score": final_score,
+                "confidence": min(final_score * 100 + 20, 95),
+                "components": component_details,
+                "market_mood": self._determine_market_mood(final_score, component_details)
+            }
+            
+        except Exception as e:
+            log(f"❌ Error aggregating sentiment scores: {e}", level="ERROR")
+            return self._get_default_sentiment()
+    
+    def _determine_market_mood(self, score: float, components: Dict) -> str:
+        """Determine overall market mood"""
+        fear_greed = components.get("fear_greed", {}).get("sentiment", "neutral")
+        social = components.get("social_volume", {}).get("volume_trend", "normal")
+        news = components.get("news_sentiment", {}).get("sentiment", "neutral")
         
-        if not signals:
-            return {'trend': 'neutral', 'weight': 0.5, 'confidence': 30}
-        
-        # Aggregate signals
-        trend_weights = {'uptrend': 0, 'downtrend': 0, 'neutral': 0}
-        for trend, weight in signals:
-            trend_weights[trend] += weight
-        
-        dominant_trend = max(trend_weights.items(), key=lambda x: x[1])
-        confidence = min(75, 40 + len(signals) * 10)
-        
+        if score > 0.7 and social == "high_interest":
+            return "euphoric"
+        elif score > 0.6 and "positive" in news:
+            return "optimistic"
+        elif score < 0.3 and "fear" in fear_greed:
+            return "panic"
+        elif score < 0.4 and social == "low_interest":
+            return "apathetic"
+        else:
+            return "cautious"
+    
+    def _get_default_sentiment(self) -> Dict[str, Any]:
+        """Return default sentiment analysis"""
         return {
-            'trend': dominant_trend[0],
-            'weight': dominant_trend[1],
-            'confidence': confidence
+            "overall_sentiment": "neutral",
+            "sentiment_score": 0.5,
+            "confidence": 50,
+            "components": {},
+            "market_mood": "cautious"
         }
+
+
+class VolumeProfileEngine:
+    """Advanced volume profile analysis for institutional activity detection"""
     
-    def _analyze_price_structure(self, candles_by_tf):
-        """Analyze higher highs/lower lows structure"""
-        if '1H' not in candles_by_tf or len(candles_by_tf['1H']) < 20:
-            return {'trend': 'neutral', 'weight': 0.5, 'confidence': 30}
+    def __init__(self):
+        self.volume_nodes = []
+        self.poc_levels = []  # Point of Control levels
+        self.value_areas = []
         
-        candles = candles_by_tf['1H'][-20:]  # Last 20 hours
-        highs = [float(c[2]) for c in candles]
-        lows = [float(c[3]) for c in candles]
-        
-        # Check for higher highs and higher lows (uptrend)
-        recent_high = max(highs[-10:])
-        earlier_high = max(highs[:10])
-        recent_low = min(lows[-10:])
-        earlier_low = min(lows[:10])
-        
-        if recent_high > earlier_high and recent_low > earlier_low:
-            return {'trend': 'uptrend', 'weight': 1.2, 'confidence': 65}
-        elif recent_high < earlier_high and recent_low < earlier_low:
-            return {'trend': 'downtrend', 'weight': 1.2, 'confidence': 65}
-        else:
-            return {'trend': 'neutral', 'weight': 0.8, 'confidence': 45}
-    
-    def _analyze_momentum(self, candles_by_tf):
-        """Analyze price momentum"""
-        if '15' not in candles_by_tf or len(candles_by_tf['15']) < 14:
-            return {'trend': 'neutral', 'weight': 0.5, 'confidence': 30}
-        
-        candles = candles_by_tf['15']
-        closes = [float(c[4]) for c in candles]
-        
-        # Calculate RSI-like momentum
-        gains = []
-        losses = []
-        
-        for i in range(1, len(closes)):
-            change = closes[i] - closes[i-1]
-            if change > 0:
-                gains.append(change)
-                losses.append(0)
-            else:
-                gains.append(0)
-                losses.append(abs(change))
-        
-        if len(gains) < 14:
-            return {'trend': 'neutral', 'weight': 0.5, 'confidence': 30}
-        
-        avg_gain = np.mean(gains[-14:])
-        avg_loss = np.mean(losses[-14:])
-        
-        if avg_loss == 0:
-            rs = 100
-        else:
-            rs = avg_gain / avg_loss
+    async def analyze_volume_profile(self, symbol: str = "BTCUSDT", 
+                                   timeframe: str = "15", 
+                                   lookback: int = 100) -> Dict[str, Any]:
+        """Analyze volume profile for institutional activity"""
+        try:
+            # Get candle data
+            response = await signed_request("GET", "/v5/market/kline", {
+                "category": "linear",
+                "symbol": symbol,
+                "interval": timeframe,
+                "limit": lookback
+            })
             
-        rsi = 100 - (100 / (1 + rs))
-        
-        if rsi > 60:
-            return {'trend': 'uptrend', 'weight': 1.0, 'confidence': min(70, 50 + (rsi-60)*2)}
-        elif rsi < 40:
-            return {'trend': 'downtrend', 'weight': 1.0, 'confidence': min(70, 50 + (40-rsi)*2)}
-        else:
-            return {'trend': 'neutral', 'weight': 0.8, 'confidence': 45}
+            if response.get("retCode") != 0:
+                return self._get_default_volume_profile()
+            
+            candles = response["result"]["list"]
+            
+            # Build volume profile
+            volume_profile = self._build_volume_profile(candles)
+            
+            # Analyze institutional patterns
+            institutional_analysis = self._analyze_institutional_patterns(volume_profile, candles)
+            
+            # Detect accumulation/distribution
+            accumulation_analysis = self._detect_accumulation_distribution(volume_profile, candles)
+            
+            # Find high-volume nodes
+            volume_nodes = self._find_high_volume_nodes(volume_profile)
+            
+            # Calculate support/resistance strength
+            sr_analysis = self._analyze_support_resistance_strength(volume_nodes, candles)
+            
+            return {
+                "volume_profile": volume_profile,
+                "institutional_activity": institutional_analysis,
+                "accumulation_distribution": accumulation_analysis,
+                "volume_nodes": volume_nodes,
+                "support_resistance": sr_analysis,
+                "poc_level": volume_nodes[0]["price"] if volume_nodes else None,
+                "value_area": self._calculate_value_area(volume_profile)
+            }
+            
+        except Exception as e:
+            log(f"❌ Error analyzing volume profile: {e}", level="ERROR")
+            return self._get_default_volume_profile()
     
-    def _analyze_volume_trend(self, candles_by_tf):
-        """Analyze volume trends"""
-        if '1H' not in candles_by_tf or len(candles_by_tf['1H']) < 20:
-            return {'trend': 'neutral', 'weight': 0.5, 'confidence': 30}
-        
-        candles = candles_by_tf['1H']
-        
-        up_volume = []
-        down_volume = []
+    def _build_volume_profile(self, candles: List) -> Dict[float, float]:
+        """Build volume profile from candle data"""
+        volume_profile = defaultdict(float)
         
         for candle in candles:
-            close = float(candle[4])
-            open_price = float(candle[1])
+            high = float(candle[2])
+            low = float(candle[3])
             volume = float(candle[5])
             
-            if close > open_price:
-                up_volume.append(volume)
-            else:
-                down_volume.append(volume)
+            # Distribute volume across price range
+            price_range = high - low
+            if price_range > 0:
+                # Use 10 price levels per candle
+                levels = 10
+                volume_per_level = volume / levels
+                price_step = price_range / levels
+                
+                for i in range(levels):
+                    price_level = low + (i * price_step)
+                    # Round to reasonable precision
+                    price_key = round(price_level, 2)
+                    volume_profile[price_key] += volume_per_level
         
-        if not up_volume or not down_volume:
-            return {'trend': 'neutral', 'weight': 0.5, 'confidence': 30}
-        
-        avg_up_vol = np.mean(up_volume)
-        avg_down_vol = np.mean(down_volume)
-        
-        if avg_up_vol > avg_down_vol * 1.3:
-            return {'trend': 'uptrend', 'weight': 1.0, 'confidence': 60}
-        elif avg_down_vol > avg_up_vol * 1.3:
-            return {'trend': 'downtrend', 'weight': 1.0, 'confidence': 60}
-        else:
-            return {'trend': 'neutral', 'weight': 0.8, 'confidence': 45}
+        return dict(volume_profile)
     
-    async def analyze_btc_trend(self):
-        """
-        Enhanced BTC trend analysis
-        FIX #12: Use concurrent API calls for multiple timeframes
-        FIXED: Complete implementation with all required analysis methods
-        """
+    def _analyze_institutional_patterns(self, volume_profile: Dict, candles: List) -> Dict[str, Any]:
+        """Analyze volume profile for institutional trading patterns"""
         try:
-            # FIX #12: Fetch all timeframes concurrently
-            tasks = []
-            for tf in self.timeframes:
-                tasks.append(self._fetch_btc_candles(tf, 100))
+            # Sort by volume to find highest activity areas
+            sorted_levels = sorted(volume_profile.items(), key=lambda x: x[1], reverse=True)
             
-            candles_results = await asyncio.gather(*tasks, return_exceptions=True)
+            if not sorted_levels:
+                return {"activity_level": "low", "pattern": "none", "strength": 0.5}
             
-            candles_by_tf = {}
-            for i, tf in enumerate(self.timeframes):
-                if (isinstance(candles_results[i], list) and 
-                    len(candles_results[i]) > 20):  # Reduced from 50 to 20 for more lenient check
-                    candles_by_tf[tf] = candles_results[i]
+            # Analyze top volume areas
+            top_10_percent = int(len(sorted_levels) * 0.1) or 1
+            high_volume_levels = sorted_levels[:top_10_percent]
             
-            if not candles_by_tf:
-                log("⚠️ No valid candle data for BTC trend analysis")
-                return {
-                    'trend': 'neutral',
-                    'strength': 0.5,
-                    'confidence': 30,
-                    'details': {'error': 'No valid candle data'}
-                }
+            total_volume = sum(volume_profile.values())
+            high_volume_concentration = sum(vol for _, vol in high_volume_levels) / total_volume
             
-            # Analyze each component
-            trend_scores = {'uptrend': 0, 'downtrend': 0, 'neutral': 0}
-            confidence_factors = []
-            analysis_details = {}
+            # Get current price for context
+            current_price = float(candles[0][4])
             
-            # 1. Moving Average Analysis
-            ma_analysis = self._analyze_moving_averages(candles_by_tf)
-            trend_scores[ma_analysis['trend']] += ma_analysis['weight']
-            confidence_factors.append(ma_analysis['confidence'])
-            analysis_details['moving_averages'] = ma_analysis
+            # Analyze volume distribution relative to current price
+            above_current = sum(vol for price, vol in high_volume_levels if price > current_price)
+            below_current = sum(vol for price, vol in high_volume_levels if price < current_price)
             
-            # 2. Price Structure Analysis
-            structure_analysis = self._analyze_price_structure(candles_by_tf)
-            trend_scores[structure_analysis['trend']] += structure_analysis['weight']
-            confidence_factors.append(structure_analysis['confidence'])
-            analysis_details['price_structure'] = structure_analysis
+            volume_imbalance = abs(above_current - below_current) / (above_current + below_current) if (above_current + below_current) > 0 else 0
             
-            # 3. Momentum Analysis
-            momentum_analysis = self._analyze_momentum(candles_by_tf)
-            trend_scores[momentum_analysis['trend']] += momentum_analysis['weight']
-            confidence_factors.append(momentum_analysis['confidence'])
-            analysis_details['momentum'] = momentum_analysis
-            
-            # 4. Volume Analysis
-            volume_analysis = self._analyze_volume_trend(candles_by_tf)
-            trend_scores[volume_analysis['trend']] += volume_analysis['weight']
-            confidence_factors.append(volume_analysis['confidence'])
-            analysis_details['volume'] = volume_analysis
-            
-            # Determine overall trend
-            total_weight = sum(trend_scores.values())
-            
-            if total_weight == 0:
-                overall_trend = 'neutral'
-                strength = 0.5
-            else:
-                # Get trend with highest score
-                overall_trend = max(trend_scores.items(), key=lambda x: x[1])[0]
-                strength = trend_scores[overall_trend] / total_weight
-                
-                # Require minimum agreement for non-neutral trends
-                if overall_trend != 'neutral' and strength < 0.6:
-                    overall_trend = 'neutral'
-                    strength = 0.5
-            
-            # Calculate confidence
-            confidence = np.mean(confidence_factors) if confidence_factors else 30
-            confidence = max(30, min(95, confidence))  # Clamp between 30-95
-            
-            # Update state
-            self.last_trend = overall_trend
-            self.trend_strength = strength
-            self.confidence = confidence
-            
-            return {
-                'trend': overall_trend,
-                'strength': strength,
-                'confidence': confidence,
-                'details': analysis_details
-            }
-            
-        except Exception as e:
-            log(f"❌ Error analyzing BTC trend: {e}", level="ERROR")
-            return {
-                'trend': 'neutral',
-                'strength': 0.5,
-                'confidence': 30,
-                'details': {'error': str(e)}
-            }
-
-
-# Global analyzer instances
-btc_analyzer = BTCTrendAnalyzer()
-altseason_detector = AltseasonDetector()
-
-# FIX #10: Thread-safe trend cache with lock
-_trend_cache = {}
-_trend_cache_lock = asyncio.Lock()
-
-async def get_trend_context_cached():
-    """
-    Get trend context with thread-safe caching
-    FIX #10: Add proper locking for thread safety
-    """
-    async with _trend_cache_lock:
-        current_time = datetime.now()
-        
-        # Check if cached result is still valid (5 minutes)
-        if ('timestamp' in _trend_cache and 
-            (current_time - _trend_cache['timestamp']).seconds < 300):
-            return _trend_cache['context']
-        
-        # Get fresh context
-        context = await get_trend_context()
-        
-        # Update cache
-        _trend_cache['context'] = context
-        _trend_cache['timestamp'] = current_time
-        
-        return context
-
-
-async def detect_market_regime():
-    """Detect current market regime - Enhanced to handle all expected values"""
-    try:
-        # Get BTC volatility data
-        kline_resp = await signed_request("GET", "/v5/market/kline", {
-            "category": "linear",
-            "symbol": "BTCUSDT",
-            "interval": "60",
-            "limit": "100"
-        })
-        
-        if kline_resp.get("retCode") != 0:
-            return "volatile"  # Default to volatile on API error
-            
-        candles = kline_resp.get("result", {}).get("list", [])
-        if len(candles) < 50:
-            return "volatile"  # Default to volatile with insufficient data
-            
-        # Calculate ATR for volatility
-        highs = [float(c[2]) for c in candles[:50]]
-        lows = [float(c[3]) for c in candles[:50]]
-        closes = [float(c[4]) for c in candles[:50]]
-        
-        # Simple ATR calculation
-        tr_values = []
-        for i in range(1, len(highs)):
-            tr = max(
-                highs[i] - lows[i],
-                abs(highs[i] - closes[i-1]),
-                abs(lows[i] - closes[i-1])
-            )
-            tr_values.append(tr)
-        
-        atr = sum(tr_values[-14:]) / 14 if len(tr_values) >= 14 else 0
-        atr_pct = (atr / closes[-1]) * 100 if closes[-1] > 0 else 0
-        
-        # Enhanced regime detection with three categories
-        if atr_pct >= 4.0:  # High volatility
-            return "volatile"
-        elif atr_pct < 1.5:  # Very low volatility - tight range
-            # Check for ranging behavior
-            price_range = (max(closes[-20:]) - min(closes[-20:])) / min(closes[-20:])
-            if price_range < 0.03:  # Less than 3% range in last 20 periods
-                return "ranging"  # Tight ranging market
-            else:
-                return "stable"  # Low volatility but not tight range
-        else:  # Medium volatility
-            return "stable"
-            
-    except Exception as e:
-        log(f"❌ Error detecting market regime: {e}", level="ERROR")
-        return "volatile"  # Safe default
-
-
-async def get_market_sentiment():
-    """
-    Analyze overall market sentiment
-    FIX #12: Use concurrent API calls instead of sequential
-    ADDITIONAL FIX: Handle empty API response lists properly
-    Returns: 'bullish', 'bearish', or 'neutral'
-    """
-    try:
-        # Get top 10 coins performance
-        symbols = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", 
-                  "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "MATICUSDT", "DOTUSDT"]
-        
-        # FIX #12: Use concurrent requests
-        tasks = [
-            signed_request("GET", "/v5/market/tickers", {
-                "category": "linear",
-                "symbol": symbol
-            }) for symbol in symbols
-        ]
-        
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        bullish_count = 0
-        bearish_count = 0
-        
-        for i, symbol in enumerate(symbols):
-            try:
-                ticker_resp = results[i]
-                
-                if (isinstance(ticker_resp, dict) and 
-                    ticker_resp.get("retCode") == 0):
-                    
-                    result_data = ticker_resp.get("result", {})
-                    ticker_list = result_data.get("list", [])
-                    
-                    # ADDITIONAL FIX: Check if list is not empty before accessing index
-                    if ticker_list and len(ticker_list) > 0:
-                        ticker = ticker_list[0]
-                        # FIX #1: Remove * 100 - price24hPcnt is already a percentage
-                        price_24h_pct = float(ticker.get("price24hPcnt", 0))
-                        
-                        if price_24h_pct > 2:
-                            bullish_count += 1
-                        elif price_24h_pct < -2:
-                            bearish_count += 1
+            # Determine institutional activity type
+            if high_volume_concentration > 0.6:
+                if volume_imbalance > 0.3:
+                    if above_current > below_current:
+                        pattern = "institutional_resistance"
                     else:
-                        log(f"⚠️ Empty ticker list for {symbol} in sentiment analysis", level="WARNING")
-
+                        pattern = "institutional_support"
+                    activity_level = "high"
                 else:
-                    log(f"⚠️ Failed ticker call for {symbol}", level="WARNING")
-                    continue
-                    
-            except Exception as e:
-                log(f"❌ Error processing sentiment for {symbol}: {e}", level="WARNING")
-                continue
-        
-        # Determine sentiment
-        if bullish_count >= 6:
-            return "bullish"
-        elif bearish_count >= 6:
-            return "bearish"
-        else:
-            return "neutral"
+                    pattern = "institutional_accumulation"
+                    activity_level = "very_high"
+            elif high_volume_concentration > 0.4:
+                pattern = "moderate_institutional"
+                activity_level = "medium"
+            else:
+                pattern = "retail_dominated"
+                activity_level = "low"
             
-    except Exception as e:
-        log(f"❌ Error calculating market sentiment: {e}", level="ERROR")
-        return "neutral"
-
-
-async def get_trend_context():
-    """
-    Enhanced main function to get complete market context
-    FIX #12: Use concurrent execution for all analyses
-    FIX #13: Move alert logic before return statement
-    """
-    try:
-        # FIX #12: Run all analyses in parallel for better performance
-        btc_trend_task = btc_analyzer.analyze_btc_trend()
-        sentiment_task = get_market_sentiment()
-        regime_task = detect_market_regime()
-        altseason_task = altseason_detector.detect_altseason()
-        
-        # Execute all tasks concurrently
-        btc_analysis, sentiment, regime, altseason_analysis = await asyncio.gather(
-            btc_trend_task, sentiment_task, regime_task, altseason_task,
-            return_exceptions=True
-        )
-        
-        # Handle any exceptions from concurrent execution
-        if isinstance(btc_analysis, Exception):
-            log(f"❌ BTC analysis failed: {btc_analysis}", level="ERROR")
-            btc_analysis = {'trend': 'neutral', 'strength': 0.5, 'confidence': 30, 'details': {}}
-        
-        if isinstance(sentiment, Exception):
-            log(f"❌ Sentiment analysis failed: {sentiment}", level="ERROR")
-            sentiment = "neutral"
-            
-        if isinstance(regime, Exception):
-            log(f"❌ Regime detection failed: {regime}", level="ERROR")
-            regime = "volatile"
-            
-        if isinstance(altseason_analysis, Exception):
-            log(f"❌ Altseason analysis failed: {altseason_analysis}", level="ERROR")
-            altseason_analysis = {'is_altseason': False, 'strength': 0, 'details': {}, 'season': 'neutral'}
-        
-        # Map neutral to ranging for backward compatibility
-        btc_trend = btc_analysis['trend']
-        if btc_trend == 'neutral':
-            btc_trend = 'ranging'
-        
-        # FIX #13: Move alert logic BEFORE return statement
-        if btc_trend == 'downtrend' and btc_analysis['confidence'] >= 70:
-            log(f"⚠️ BTC DOWNTREND CONFIRMED with {btc_analysis['confidence']:.1f}% confidence")
-            try:
-                from telegram_bot import send_telegram_message
-                await send_telegram_message(
-                    f"⚠️ <b>BTC DOWNTREND ALERT</b>\n"
-                    f"Confidence: {btc_analysis['confidence']:.1f}%\n"
-                    f"Strength: {btc_analysis['strength']:.1f}\n"
-                    f"Consider reducing risk exposure"
-                )
-            except Exception as alert_error:
-                log(f"❌ Failed to send downtrend alert: {alert_error}", level="WARNING")
-        
-        context = {
-            "btc_trend": btc_trend,
-            "btc_strength": btc_analysis['strength'],
-            "btc_confidence": btc_analysis['confidence'],
-            "btc_details": btc_analysis['details'],
-            "sentiment": sentiment,
-            "regime": regime,
-            "altseason": altseason_analysis['is_altseason'],
-            "altseason_strength": altseason_analysis['strength'],
-            "altseason_details": altseason_analysis['details'],
-            "market_season": altseason_analysis['season'],
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
-        
-        # Enhanced logging with confidence
-        season_str = f" | ALTSEASON ({altseason_analysis['strength']:.0%})" if altseason_analysis['is_altseason'] else ""
-        log(f"📊 Market Context: BTC {btc_trend} (conf: {btc_analysis['confidence']:.1f}%), " +
-            f"Sentiment {sentiment}, Regime {regime}{season_str}")
-        
-        return context
-        
-    except Exception as e:
-        log(f"❌ Error getting trend context: {e}", level="ERROR")
-        # Return safe defaults on any error
-        return {
-            "btc_trend": "ranging",
-            "btc_strength": 0.5,
-            "btc_confidence": 30,
-            "btc_details": {"error": str(e)},
-            "sentiment": "neutral",
-            "regime": "volatile",
-            "altseason": False,
-            "altseason_strength": 0,
-            "altseason_details": {},
-            "market_season": "neutral",
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
-
-
-# Additional helper functions with fixes
-
-def calculate_ema_fixed(prices, period):
-    """
-    Fixed EMA calculation for backward compatibility
-    FIX #9: Proper initialization with SMA of first period prices
-    """
-    if len(prices) < period:
-        return prices[-1] if prices else 0
-    
-    # FIX #9: Initialize with SMA of first period prices
-    ema = np.mean(prices[:period])
-    multiplier = 2 / (period + 1)
-    
-    # Start from period index
-    for price in prices[period:]:
-        ema = (price * multiplier) + (ema * (1 - multiplier))
-    
-    return ema
-
-
-async def get_btc_trend():
-    """
-    Enhanced BTC trend analysis using the new analyzer
-    Returns: 'uptrend', 'downtrend', or 'ranging' (maps neutral to ranging)
-    """
-    result = await btc_analyzer.analyze_btc_trend()
-    
-    # Map neutral to ranging for backward compatibility
-    trend = result['trend']
-    if trend == 'neutral':
-        trend = 'ranging'
-    
-    return trend
-
-
-# Monitoring functions with concurrent improvements
-
-async def monitor_btc_trend_accuracy():
-    """
-    Monitor and report BTC trend accuracy
-    FIX #12: Improved monitoring with better error handling
-    """
-    
-    while True:
-        try:
-            # Get current status with timeout
-            summary = f"BTC Trend: {btc_analyzer.last_trend.upper()} "
-            summary += f"(strength: {btc_analyzer.trend_strength:.2f}, "
-            summary += f"confidence: {btc_analyzer.confidence:.1f}%)"
-            
-            # Log every 30 minutes
-            log(f"📊 BTC Trend Monitor: {summary}")
+            return {
+                "activity_level": activity_level,
+                "pattern": pattern,
+                "strength": high_volume_concentration,
+                "volume_imbalance": volume_imbalance,
+                "concentration_ratio": high_volume_concentration
+            }
             
         except Exception as e:
-            log(f"❌ Error in BTC trend monitor: {e}", level="ERROR")
-        
-        await asyncio.sleep(1800)  # 30 minutes
-
-
-async def monitor_altseason_status():
-    """
-    Monitor and report altseason status
-    FIX #12: Enhanced monitoring with concurrent checks
-    """
+            log(f"❌ Error analyzing institutional patterns: {e}", level="ERROR")
+            return {"activity_level": "low", "pattern": "none", "strength": 0.5}
     
-    while True:
+    def _detect_accumulation_distribution(self, volume_profile: Dict, candles: List) -> Dict[str, Any]:
+        """Detect accumulation/distribution phases"""
         try:
-            # Use timeout for altseason detection
-            result = await asyncio.wait_for(
-                altseason_detector.detect_altseason(), 
-                timeout=30
+            if len(candles) < 20:
+                return {"phase": "unknown", "strength": 0.5}
+            
+            # Get price trend
+            prices = [float(c[4]) for c in candles[-20:]]
+            price_trend = (prices[-1] - prices[0]) / prices[0]
+            
+            # Get volume trend
+            volumes = [float(c[5]) for c in candles[-20:]]
+            early_vol = np.mean(volumes[:10])
+            recent_vol = np.mean(volumes[-10:])
+            volume_trend = (recent_vol - early_vol) / early_vol if early_vol > 0 else 0
+            
+            # Analyze volume profile distribution
+            current_price = float(candles[0][4])
+            
+            # Calculate volume above and below current price
+            total_volume = sum(volume_profile.values())
+            volume_below = sum(vol for price, vol in volume_profile.items() if price < current_price)
+            volume_above = sum(vol for price, vol in volume_profile.items() if price > current_price)
+            
+            volume_balance = (volume_below - volume_above) / total_volume if total_volume > 0 else 0
+            
+            # Determine accumulation/distribution
+            if volume_trend > 0.2 and abs(price_trend) < 0.05:
+                # High volume, low price movement = accumulation
+                if volume_balance > 0.1:
+                    phase = "accumulation_below"
+                else:
+                    phase = "accumulation_above"
+                strength = min(volume_trend * 2, 1.0)
+            elif volume_trend < -0.2 and abs(price_trend) > 0.05:
+                # Decreasing volume with price movement = distribution
+                phase = "distribution"
+                strength = min(abs(volume_trend) * 2, 1.0)
+            elif price_trend > 0.05 and volume_trend > 0.1:
+                # Rising price with rising volume = markup
+                phase = "markup"
+                strength = min((price_trend + volume_trend) * 2, 1.0)
+            elif price_trend < -0.05 and volume_trend > 0.1:
+                # Falling price with rising volume = markdown
+                phase = "markdown"
+                strength = min((abs(price_trend) + volume_trend) * 2, 1.0)
+            else:
+                phase = "neutral"
+                strength = 0.5
+            
+            return {
+                "phase": phase,
+                "strength": strength,
+                "price_trend": price_trend,
+                "volume_trend": volume_trend,
+                "volume_balance": volume_balance
+            }
+            
+        except Exception as e:
+            log(f"❌ Error detecting accumulation/distribution: {e}", level="ERROR")
+            return {"phase": "unknown", "strength": 0.5}
+    
+    def _find_high_volume_nodes(self, volume_profile: Dict) -> List[Dict[str, Any]]:
+        """Find high-volume nodes that act as support/resistance"""
+        try:
+            if not volume_profile:
+                return []
+            
+            # Sort by volume
+            sorted_levels = sorted(volume_profile.items(), key=lambda x: x[1], reverse=True)
+            
+            # Get top volume nodes
+            total_volume = sum(volume_profile.values())
+            nodes = []
+            
+            for price, volume in sorted_levels[:10]:  # Top 10 nodes
+                volume_percentage = volume / total_volume
+                
+                if volume_percentage > 0.03:  # At least 3% of total volume
+                    nodes.append({
+                        "price": price,
+                        "volume": volume,
+                        "volume_percentage": volume_percentage,
+                        "strength": min(volume_percentage * 20, 1.0)  # Normalize to 0-1
+                    })
+            
+            return nodes
+            
+        except Exception as e:
+            log(f"❌ Error finding high volume nodes: {e}", level="ERROR")
+            return []
+    
+    def _analyze_support_resistance_strength(self, volume_nodes: List, candles: List) -> Dict[str, Any]:
+        """Analyze support/resistance strength based on volume"""
+        try:
+            if not volume_nodes or not candles:
+                return {"support_levels": [], "resistance_levels": [], "strength": "weak"}
+            
+            current_price = float(candles[0][4])
+            
+            support_levels = []
+            resistance_levels = []
+            
+            for node in volume_nodes:
+                price = node["price"]
+                strength = node["strength"]
+                
+                if price < current_price:
+                    support_levels.append({
+                        "price": price,
+                        "strength": strength,
+                        "distance_pct": abs(price - current_price) / current_price * 100
+                    })
+                else:
+                    resistance_levels.append({
+                        "price": price,
+                        "strength": strength,
+                        "distance_pct": abs(price - current_price) / current_price * 100
+                    })
+            
+            # Sort by proximity to current price
+            support_levels.sort(key=lambda x: x["distance_pct"])
+            resistance_levels.sort(key=lambda x: x["distance_pct"])
+            
+            # Determine overall strength
+            avg_strength = np.mean([node["strength"] for node in volume_nodes])
+            
+            if avg_strength > 0.7:
+                overall_strength = "very_strong"
+            elif avg_strength > 0.5:
+                overall_strength = "strong"
+            elif avg_strength > 0.3:
+                overall_strength = "moderate"
+            else:
+                overall_strength = "weak"
+            
+            return {
+                "support_levels": support_levels[:3],  # Top 3 nearest support
+                "resistance_levels": resistance_levels[:3],  # Top 3 nearest resistance
+                "strength": overall_strength,
+                "avg_strength": avg_strength
+            }
+            
+        except Exception as e:
+            log(f"❌ Error analyzing support/resistance strength: {e}", level="ERROR")
+            return {"support_levels": [], "resistance_levels": [], "strength": "weak"}
+    
+    def _calculate_value_area(self, volume_profile: Dict) -> Dict[str, Any]:
+        """Calculate value area (70% of volume)"""
+        try:
+            if not volume_profile:
+                return {"high": None, "low": None, "poc": None}
+            
+            # Sort by price
+            sorted_by_price = sorted(volume_profile.items())
+            total_volume = sum(volume_profile.values())
+            target_volume = total_volume * 0.7
+            
+            # Find POC (Point of Control) - highest volume level
+            poc_price = max(volume_profile.items(), key=lambda x: x[1])[0]
+            
+            # Find value area around POC
+            accumulated_volume = volume_profile[poc_price]
+            value_area_prices = [poc_price]
+            
+            # Expand around POC until 70% volume is captured
+            price_list = [price for price, _ in sorted_by_price]
+            poc_index = price_list.index(poc_price)
+            
+            left_idx = poc_index - 1
+            right_idx = poc_index + 1
+            
+            while accumulated_volume < target_volume and (left_idx >= 0 or right_idx < len(price_list)):
+                left_vol = volume_profile.get(price_list[left_idx], 0) if left_idx >= 0 else 0
+                right_vol = volume_profile.get(price_list[right_idx], 0) if right_idx < len(price_list) else 0
+                
+                if left_vol >= right_vol and left_idx >= 0:
+                    accumulated_volume += left_vol
+                    value_area_prices.append(price_list[left_idx])
+                    left_idx -= 1
+                elif right_idx < len(price_list):
+                    accumulated_volume += right_vol
+                    value_area_prices.append(price_list[right_idx])
+                    right_idx += 1
+                else:
+                    break
+            
+            return {
+                "high": max(value_area_prices),
+                "low": min(value_area_prices),
+                "poc": poc_price,
+                "volume_percentage": accumulated_volume / total_volume
+            }
+            
+        except Exception as e:
+            log(f"❌ Error calculating value area: {e}", level="ERROR")
+            return {"high": None, "low": None, "poc": None}
+    
+    def _get_default_volume_profile(self) -> Dict[str, Any]:
+        """Return default volume profile analysis"""
+        return {
+            "volume_profile": {},
+            "institutional_activity": {"activity_level": "low", "pattern": "none", "strength": 0.5},
+            "accumulation_distribution": {"phase": "unknown", "strength": 0.5},
+            "volume_nodes": [],
+            "support_resistance": {"support_levels": [], "resistance_levels": [], "strength": "weak"},
+            "poc_level": None,
+            "value_area": {"high": None, "low": None, "poc": None}
+        }
+
+
+class EnhancedTrendOrchestrator:
+    """Main orchestrator for enhanced trend detection system"""
+    
+    def __init__(self):
+        self.market_structure = MarketStructureAnalyzer()
+        self.altseason_detector = EnhancedAltseasonDetector()
+        self.sentiment_analyzer = MultiSourceSentimentAnalyzer()
+        self.volume_engine = VolumeProfileEngine()
+        
+        # Cache for performance
+        self.cache = {}
+        self.cache_ttl = 300  # 5 minutes
+        self.last_update = {}
+    
+    async def get_enhanced_trend_context(self) -> Dict[str, Any]:
+        """Get comprehensive trend context using all enhanced analyzers"""
+        try:
+            current_time = datetime.now()
+            
+            # Check cache
+            if self._is_cache_valid("trend_context", current_time):
+                return self.cache["trend_context"]
+            
+            log("🔍 Running enhanced trend analysis...")
+            
+            # Run all analyses concurrently for speed
+            analyses = await asyncio.gather(
+                self.market_structure.analyze_market_structure(),
+                self.altseason_detector.detect_enhanced_altseason(),
+                self.sentiment_analyzer.get_aggregated_sentiment(),
+                self.volume_engine.analyze_volume_profile(),
+                return_exceptions=True
             )
             
-            if result['is_altseason']:
-                details = result['details']
-                
-                # Build status message
-                msg = f"🚀 ALTSEASON STATUS\n"
-                msg += f"Season: {result['season']}\n"
-                msg += f"Strength: {result['strength']:.0%}\n"
-                
-                if 'alt_performance' in details:
-                    ratio = details['alt_performance'].get('ratio', 0)
-                    msg += f"Alts outperforming BTC: {ratio:.0%}\n"
-                
-                if 'volume' in details:
-                    btc_dom = details['volume'].get('btc_dominance', 0)
-                    msg += f"BTC volume dominance: {btc_dom:.0%}\n"
-                
-                log(msg)
+            structure_analysis, altseason_analysis, sentiment_analysis, volume_analysis = analyses
             
-        except asyncio.TimeoutError:
-            log("⚠️ Altseason detection timeout", level="WARNING")
+            # Handle any exceptions
+            if isinstance(structure_analysis, Exception):
+                log(f"❌ Market structure analysis failed: {structure_analysis}", level="WARNING")
+                structure_analysis = self.market_structure._get_default_structure()
+            
+            if isinstance(altseason_analysis, Exception):
+                log(f"❌ Altseason analysis failed: {altseason_analysis}", level="WARNING")
+                altseason_analysis = self.altseason_detector._get_default_altseason()
+            
+            if isinstance(sentiment_analysis, Exception):
+                log(f"❌ Sentiment analysis failed: {sentiment_analysis}", level="WARNING")
+                sentiment_analysis = self.sentiment_analyzer._get_default_sentiment()
+            
+            if isinstance(volume_analysis, Exception):
+                log(f"❌ Volume analysis failed: {volume_analysis}", level="WARNING")
+                volume_analysis = self.volume_engine._get_default_volume_profile()
+            
+            # Combine all analyses
+            enhanced_context = self._combine_trend_analyses(
+                structure_analysis, altseason_analysis, sentiment_analysis, volume_analysis
+            )
+            
+            # Cache result
+            self.cache["trend_context"] = enhanced_context
+            self.last_update["trend_context"] = current_time
+            
+            # Log comprehensive summary
+            self._log_trend_summary(enhanced_context)
+            
+            return enhanced_context
+            
         except Exception as e:
-            log(f"❌ Error in altseason monitor: {e}", level="ERROR")
-        
-        await asyncio.sleep(3600)  # Check every hour
-
-
-# Enhanced validation functions
-
-async def validate_short_signal(symbol, candles_by_tf):
-    """
-    Unified async short signal validator with full macro + micro logic:
-    - BTC trend, confidence, sentiment, volatility regime, altseason
-    - Bullish candle filter (5m)
-    - Bearish indicator scoring
-    - Price/indicator divergence (15m)
-    """
-    try:
-        # Ensure required candles are present
-        if '5' not in candles_by_tf or '15' not in candles_by_tf:
-            log(f"❌ {symbol}: Missing required timeframes (5m/15m)")
-            return False
-
-        # Fetch full trend context (cached async call)
-        context = await get_trend_context_cached()
-        btc_trend = context.get('btc_trend', 'neutral')
-        btc_confidence = context.get('btc_confidence', 0)
-        sentiment = context.get('sentiment', 'neutral')
-        regime = context.get('regime', 'calm')
-        altseason_strength = context.get('altseason_strength', 0)
-        is_altseason = context.get('altseason', False)
-
-        # Step 1: BTC trend and confidence check
-        if btc_trend not in ['downtrend', 'ranging']:
-            log(f"❌ {symbol}: BTC trend is {btc_trend}, not short-friendly")
-            return False
-        if btc_trend == 'downtrend' and btc_confidence < 65:
-            log(f"❌ {symbol}: BTC downtrend confidence too low ({btc_confidence:.1f}%)")
-            return False
-
-        # Step 2: Recent bullish candles (5m)
-        recent_candles = candles_by_tf['5'][-5:]
-        bullish_candles = sum(1 for c in recent_candles if float(c['close']) > float(c['open']))
-        if bullish_candles > 2:
-            log(f"❌ {symbol}: Too many recent bullish candles ({bullish_candles}/5)")
-            return False
-
-        # Step 3: Macro indicator scoring (custom logic)
-        indicator_scores = {}
-
-        # BTC trend impact
-        indicator_scores['btc_trend'] = -1.5 if btc_trend == 'downtrend' else (-0.5 if btc_trend == 'ranging' else 0.3)
-
-        # Sentiment
-        indicator_scores['sentiment'] = -1.2 if sentiment == 'bearish' else (-0.3 if sentiment == 'neutral' else 0.3)
-
-        # Volatility regime
-        indicator_scores['regime'] = -0.8 if regime == 'volatile' else 0.2
-
-        # Altseason impact
-        indicator_scores['altseason'] = 0.8 if is_altseason and altseason_strength > 0.7 else -0.2
-
-        # Step 4: Require at least 2 strong bearish indicators
-        strong_bearish = sum(1 for v in indicator_scores.values() if v < -1.0)
-        if strong_bearish < 2:
-            log(f"❌ {symbol}: Not enough strong bearish indicators ({strong_bearish})")
-            return False
-
-        # Step 5: Check divergence (price rising, indicators bearish)
-        candles_15m = candles_by_tf['15'][-5:]
-        close_prices = [float(c['close']) for c in candles_15m]
-        price_up = close_prices[-1] > close_prices[0]
-        indicator_trend_down = sum(indicator_scores.values()) < -2
-
-        if price_up and not indicator_trend_down:
-            log(f"❌ {symbol}: Price rising while indicators not strongly bearish")
-            return False
-
-        log(f"✅ {symbol}: Short signal validated (macro + micro aligned)")
-        return True
-
-    except Exception as e:
-        log(f"❌ Error validating short signal for {symbol}: {e}", level="ERROR")
-        return False
-
-
-# Cache cleanup functions
-
-async def cleanup_caches_periodically():
-    """
-    Periodically clean up caches to prevent memory bloat
-    FIX #10: Proper cache management
-    """
-    while True:
+            log(f"❌ Error getting enhanced trend context: {e}", level="ERROR")
+            return self._get_fallback_context()
+    
+    def _combine_trend_analyses(self, structure: Dict, altseason: Dict, 
+                               sentiment: Dict, volume: Dict) -> Dict[str, Any]:
+        """Combine all trend analyses into unified context"""
         try:
-            async with _trend_cache_lock:
-                # Clear old cache entries
-                current_time = datetime.now()
-                if ('timestamp' in _trend_cache and 
-                    (current_time - _trend_cache['timestamp']).seconds > 3600):
-                    _trend_cache.clear()
-                    log("🧹 Cleared trend cache")
+            # Base trend from market structure
+            base_trend = structure.get("structure", "neutral")
+            structure_strength = structure.get("strength", 0.5)
+            structure_confidence = structure.get("confidence", 50)
+            
+            # Altseason impact
+            altseason_active = altseason.get("is_altseason", False)
+            altseason_strength = altseason.get("strength", 0.5)
+            
+            # Sentiment impact
+            sentiment_score = sentiment.get("sentiment_score", 0.5)
+            overall_sentiment = sentiment.get("overall_sentiment", "neutral")
+            
+            # Volume profile impact
+            institutional_activity = volume.get("institutional_activity", {})
+            accumulation_phase = volume.get("accumulation_distribution", {}).get("phase", "unknown")
+            
+            # Calculate enhanced trend confidence
+            confidence_factors = [
+                structure_confidence / 100,
+                altseason.get("confidence", 50) / 100,
+                sentiment.get("confidence", 50) / 100,
+                institutional_activity.get("strength", 0.5)
+            ]
+            
+            enhanced_confidence = np.mean(confidence_factors) * 100
+            enhanced_confidence = max(30, min(95, enhanced_confidence))
+            
+            # Determine market regime
+            market_regime = self._determine_enhanced_regime(
+                structure, altseason, sentiment, volume
+            )
+            
+            # Calculate trend strength with all factors
+            enhanced_strength = self._calculate_enhanced_strength(
+                structure_strength, altseason_strength, sentiment_score,
+                institutional_activity.get("strength", 0.5)
+            )
+            
+            # Generate trading recommendations
+            recommendations = self._generate_trading_recommendations(
+                base_trend, enhanced_strength, enhanced_confidence, market_regime
+            )
+            
+            return {
+                # Core trend data
+                "trend": base_trend,
+                "strength": enhanced_strength,
+                "confidence": enhanced_confidence,
+                "regime": market_regime,
+                
+                # Enhanced components
+                "market_structure": structure,
+                "altseason": altseason,
+                "sentiment": sentiment,
+                "volume_profile": volume,
+                
+                # Derived insights
+                "market_phase": structure.get("market_phase", "neutral"),
+                "institutional_activity": institutional_activity.get("activity_level", "low"),
+                "accumulation_phase": accumulation_phase,
+                "breakout_probability": structure.get("breakout_probability", {}),
+                
+                # Trading context
+                "recommendations": recommendations,
+                "risk_level": self._assess_risk_level(enhanced_confidence, market_regime),
+                "opportunity_score": self._calculate_opportunity_score(structure, sentiment, volume),
+                
+                # Key levels
+                "support_levels": volume.get("support_resistance", {}).get("support_levels", []),
+                "resistance_levels": volume.get("support_resistance", {}).get("resistance_levels", []),
+                "poc_level": volume.get("poc_level"),
+                "value_area": volume.get("value_area", {}),
+                
+                # Metadata
+                "timestamp": datetime.now().isoformat(),
+                "analysis_quality": enhanced_confidence,
+                "data_sources": ["market_structure", "altseason", "sentiment", "volume_profile"]
+            }
             
         except Exception as e:
-            log(f"❌ Error cleaning caches: {e}", level="ERROR")
+            log(f"❌ Error combining trend analyses: {e}", level="ERROR")
+            return self._get_fallback_context()
+    
+    def _determine_enhanced_regime(self, structure: Dict, altseason: Dict, 
+                                  sentiment: Dict, volume: Dict) -> str:
+        """Determine enhanced market regime"""
+        try:
+            market_phase = structure.get("market_phase", "neutral")
+            breakout_prob = structure.get("breakout_probability", {}).get("probability", 0.5)
+            sentiment_score = sentiment.get("sentiment_score", 0.5)
+            institutional_activity = volume.get("institutional_activity", {}).get("activity_level", "low")
+            
+            # Enhanced regime logic
+            if breakout_prob > 0.8:
+                return "breakout_imminent"
+            elif market_phase == "trending" and sentiment_score > 0.7:
+                return "strong_trending"
+            elif market_phase == "consolidation" and institutional_activity == "very_high":
+                return "institutional_accumulation"
+            elif altseason.get("is_altseason") and altseason.get("strength", 0) > 0.7:
+                return "altseason_active"
+            elif sentiment_score < 0.3 and institutional_activity in ["high", "very_high"]:
+                return "capitulation_buying"
+            elif sentiment_score > 0.8 and breakout_prob < 0.3:
+                return "euphoric_distribution"
+            elif market_phase == "ranging":
+                return "range_bound"
+            elif institutional_activity == "low" and sentiment_score < 0.4:
+                return "low_conviction"
+            else:
+                return "transitional"
+                
+        except Exception as e:
+            log(f"❌ Error determining enhanced regime: {e}", level="ERROR")
+            return "unknown"
+    
+    def _calculate_enhanced_strength(self, structure_strength: float, altseason_strength: float,
+                                   sentiment_score: float, institutional_strength: float) -> float:
+        """Calculate enhanced trend strength"""
+        try:
+            # Weighted combination
+            weights = {
+                "structure": 0.4,
+                "sentiment": 0.25,
+                "institutional": 0.2,
+                "altseason": 0.15
+            }
+            
+            enhanced_strength = (
+                structure_strength * weights["structure"] +
+                sentiment_score * weights["sentiment"] +
+                institutional_strength * weights["institutional"] +
+                altseason_strength * weights["altseason"]
+            )
+            
+            return max(0.0, min(1.0, enhanced_strength))
+            
+        except Exception as e:
+            log(f"❌ Error calculating enhanced strength: {e}", level="ERROR")
+            return 0.5
+    
+    def _generate_trading_recommendations(self, trend: str, strength: float, 
+                                        confidence: float, regime: str) -> Dict[str, Any]:
+        """Generate trading recommendations based on analysis"""
+        try:
+            recommendations = {
+                "primary_strategy": "neutral",
+                "risk_allocation": "moderate",
+                "timeframe_preference": "mixed",
+                "position_sizing": "normal",
+                "entry_conditions": [],
+                "risk_management": []
+            }
+            
+            # Strategy recommendations
+            if regime == "strong_trending" and confidence > 70:
+                recommendations["primary_strategy"] = "trend_following"
+                recommendations["risk_allocation"] = "aggressive"
+                recommendations["timeframe_preference"] = "medium_to_long"
+                recommendations["entry_conditions"] = ["momentum_confirmation", "pullback_entry"]
+                
+            elif regime == "breakout_imminent" and strength > 0.7:
+                recommendations["primary_strategy"] = "breakout_trading"
+                recommendations["risk_allocation"] = "moderate_aggressive"
+                recommendations["timeframe_preference"] = "short_to_medium"
+                recommendations["entry_conditions"] = ["volume_confirmation", "level_break"]
+                
+            elif regime == "range_bound":
+                recommendations["primary_strategy"] = "mean_reversion"
+                recommendations["risk_allocation"] = "conservative"
+                recommendations["timeframe_preference"] = "short"
+                recommendations["entry_conditions"] = ["support_resistance_touch", "oversold_overbought"]
+                
+            elif regime == "institutional_accumulation":
+                recommendations["primary_strategy"] = "accumulation_following"
+                recommendations["risk_allocation"] = "moderate"
+                recommendations["timeframe_preference"] = "long"
+                recommendations["entry_conditions"] = ["institutional_confirmation", "value_area_entry"]
+                
+            elif regime == "altseason_active":
+                recommendations["primary_strategy"] = "alt_momentum"
+                recommendations["risk_allocation"] = "aggressive"
+                recommendations["timeframe_preference"] = "short_to_medium"
+                recommendations["entry_conditions"] = ["alt_breakout", "sector_rotation"]
+                
+            else:
+                recommendations["primary_strategy"] = "wait_and_see"
+                recommendations["risk_allocation"] = "conservative"
+                
+            # Risk management based on confidence
+            if confidence < 50:
+                recommendations["risk_management"] = ["tight_stops", "small_position", "quick_exits"]
+            elif confidence < 70:
+                recommendations["risk_management"] = ["normal_stops", "moderate_position"]
+            else:
+                recommendations["risk_management"] = ["wider_stops", "larger_position", "let_winners_run"]
+            
+            return recommendations
+            
+        except Exception as e:
+            log(f"❌ Error generating recommendations: {e}", level="ERROR")
+            return {"primary_strategy": "neutral", "risk_allocation": "conservative"}
+    
+    def _assess_risk_level(self, confidence: float, regime: str) -> str:
+        """Assess overall market risk level"""
+        high_risk_regimes = ["euphoric_distribution", "capitulation_buying", "breakout_imminent"]
+        moderate_risk_regimes = ["strong_trending", "altseason_active", "transitional"]
+        low_risk_regimes = ["range_bound", "institutional_accumulation"]
         
-        await asyncio.sleep(1800)  # Clean every 30 minutes
+        if regime in high_risk_regimes or confidence < 40:
+            return "high"
+        elif regime in moderate_risk_regimes and confidence > 60:
+            return "moderate"
+        elif regime in low_risk_regimes and confidence > 70:
+            return "low"
+        else:
+            return "moderate"
+    
+    def _calculate_opportunity_score(self, structure: Dict, sentiment: Dict, volume: Dict) -> float:
+        """Calculate overall opportunity score"""
+        try:
+            # Factors that increase opportunity
+            breakout_prob = structure.get("breakout_probability", {}).get("probability", 0.5)
+            sentiment_extremes = abs(sentiment.get("sentiment_score", 0.5) - 0.5) * 2  # 0-1 scale
+            institutional_activity = volume.get("institutional_activity", {}).get("strength", 0.5)
+            
+            # Combine factors
+            opportunity_score = (breakout_prob * 0.4 + sentiment_extremes * 0.3 + institutional_activity * 0.3)
+            
+            return max(0.0, min(1.0, opportunity_score))
+            
+        except Exception as e:
+            log(f"❌ Error calculating opportunity score: {e}", level="ERROR")
+            return 0.5
+    
+    def _is_cache_valid(self, key: str, current_time: datetime) -> bool:
+        """Check if cached data is still valid"""
+        if key not in self.cache or key not in self.last_update:
+            return False
+        
+        elapsed = (current_time - self.last_update[key]).total_seconds()
+        return elapsed < self.cache_ttl
+    
+    def _log_trend_summary(self, context: Dict) -> None:
+        """Log comprehensive trend summary"""
+        try:
+            trend = context.get("trend", "neutral")
+            strength = context.get("strength", 0.5)
+            confidence = context.get("confidence", 50)
+            regime = context.get("regime", "unknown")
+            opportunity = context.get("opportunity_score", 0.5)
+            
+            altseason = "ACTIVE" if context.get("altseason", {}).get("is_altseason") else "INACTIVE"
+            institutional = context.get("institutional_activity", "unknown").upper()
+            
+            summary = (
+                f"📊 ENHANCED TREND ANALYSIS\n"
+                f"Trend: {trend.upper()} (strength: {strength:.2f}, confidence: {confidence:.1f}%)\n"
+                f"Regime: {regime.upper()} | Risk: {context.get('risk_level', 'unknown').upper()}\n"
+                f"Altseason: {altseason} | Institutional: {institutional}\n"
+                f"Opportunity Score: {opportunity:.2f} | Strategy: {context.get('recommendations', {}).get('primary_strategy', 'unknown').upper()}"
+            )
+            
+            log(summary)
+            
+            # Log key levels if available
+            poc = context.get("poc_level")
+            if poc:
+                log(f"🎯 Key Levels - POC: {poc:.2f}")
+            
+        except Exception as e:
+            log(f"❌ Error logging trend summary: {e}", level="ERROR")
+    
+    def _get_fallback_context(self) -> Dict[str, Any]:
+        """Return fallback context if all analyses fail"""
+        return {
+            "trend": "neutral",
+            "strength": 0.5,
+            "confidence": 30,
+            "regime": "unknown",
+            "market_structure": {},
+            "altseason": {"is_altseason": False, "strength": 0.5},
+            "sentiment": {"overall_sentiment": "neutral", "sentiment_score": 0.5},
+            "volume_profile": {},
+            "recommendations": {"primary_strategy": "wait_and_see", "risk_allocation": "conservative"},
+            "risk_level": "high",
+            "opportunity_score": 0.3,
+            "support_levels": [],
+            "resistance_levels": [],
+            "timestamp": datetime.now().isoformat(),
+            "analysis_quality": 30,
+            "error": "fallback_mode"
+        }
 
 
-# Export main functions for backward compatibility
+# Global enhanced trend orchestrator
+enhanced_trend_orchestrator = EnhancedTrendOrchestrator()
+
+# Main enhanced trend function for backward compatibility
+async def get_enhanced_trend_context() -> Dict[str, Any]:
+    """Main function to get enhanced trend context"""
+    return await enhanced_trend_orchestrator.get_enhanced_trend_context()
+
+# Export enhanced functions
 __all__ = [
-    'get_trend_context',
-    'get_trend_context_cached', 
-    'get_btc_trend',
-    'detect_market_regime',
-    'get_market_sentiment',
-    'calculate_ema_fixed',
-    'validate_short_signal',  # Added missing function
-    'monitor_btc_trend_accuracy',
-    'monitor_altseason_status',
-    'btc_analyzer',
-    'altseason_detector'
+    'MarketStructureAnalyzer',
+    'EnhancedAltseasonDetector', 
+    'MultiSourceSentimentAnalyzer',
+    'VolumeProfileEngine',
+    'EnhancedTrendOrchestrator',
+    'enhanced_trend_orchestrator',
+    'get_enhanced_trend_context'
 ]
-
-
-

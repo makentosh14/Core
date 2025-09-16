@@ -26,9 +26,9 @@ DEFAULT_INTERVAL = '1'
 SUPPORTED_INTERVALS = ['1', '3', '5', '15']
 
 # === SIGNAL THRESHOLDS ===
-MIN_SCALP_SCORE = 9.5
-MIN_INTRADAY_SCORE = 10.5
-MIN_SWING_SCORE = 12
+MIN_SCALP_SCORE = 9.0
+MIN_INTRADAY_SCORE = 11.0
+MIN_SWING_SCORE = 14.0
 ALTSEASON_SCORE_BOOST = 0.5
 MEME_SCORE_BOOST = 0.5
 ALWAYS_ALLOW_SWING = False  # ❌ Disabled to prevent low-score trades - change back to True if needed
@@ -187,4 +187,5 @@ STRATEGY_REGIME_PREFERENCES = {
     "swing": ["trending", "ranging"],
     "range_break": ["ranging", "consolidating"]
 }
+
 

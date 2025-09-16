@@ -31,8 +31,8 @@ recent_exits = {}
 EXIT_COOLDOWN = 120
 
 # Core Strategy Thresholds - Enhanced for Quality
-MIN_SCALP_SCORE = 11.0      # High quality scalps only
-MIN_INTRADAY_SCORE = 12.0   # High quality intraday only  
+MIN_SCALP_SCORE = 9.0      # High quality scalps only
+MIN_INTRADAY_SCORE = 10.0   # High quality intraday only  
 MIN_SWING_SCORE = 14.0      # High quality swings only
 
 # Core Strategy Risk Management - Conservative
@@ -805,4 +805,5 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+
 

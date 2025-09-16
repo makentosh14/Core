@@ -6,7 +6,7 @@ It maintains backward compatibility while adding powerful new features.
 
 import asyncio
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from logger import log
 
 # Import both old and new systems

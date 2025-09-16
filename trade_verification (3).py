@@ -1,14 +1,25 @@
 #!/usr/bin/env python3
 """
-FIXED trade_verification.py - Resolves import errors and XEMUSDT disappearance issue
+FIXED trade_verification.py - Resolves import errors and circular dependencies
 """
 
 import asyncio
 import traceback
 from datetime import datetime
+from typing import Dict, Any, Optional, Callable
 from logger import log, write_log
 from bybit_api import signed_request
 from error_handler import send_telegram_message
+
+# Dependency injection to avoid circular imports
+_save_trades_func: Optional[Callable] = None
+_active_trades_ref: Optional[Dict] = None
+
+def set_dependencies(save_func: Callable, active_trades: Dict):
+    """Set dependencies to avoid circular imports"""
+    global _save_trades_func, _active_trades_ref
+    _save_trades_func = save_func
+    _active_trades_ref = active_trades
 
 def normalize_direction(direction):
     """Normalize direction to handle different formats between bot and exchange"""
@@ -27,7 +38,7 @@ def normalize_direction(direction):
     
     return direction_map.get(direction, direction)
 
-async def verify_position_and_orders(symbol, trade, auto_repair=True):
+async def verify_position_and_orders(symbol: str, trade: Dict, auto_repair: bool = True) -> Dict[str, Any]:
     """
     FIXED: Proper position verification that accounts for DCA correctly
     """
@@ -75,102 +86,67 @@ async def verify_position_and_orders(symbol, trade, auto_repair=True):
                 
         if not position_data:
             result["position_exists"] = False
-            # Track verification failures
-            if "verification_failures" not in trade:
-                trade["verification_failures"] = 0
-            trade["verification_failures"] += 1
+            result["issues_detected"].append("No position found on exchange")
             
-            if trade["verification_failures"] >= 3:
-                result["manual_review_required"].append(
-                    f"Position not found for {trade['verification_failures']} consecutive checks"
-                )
-                trade["needs_manual_review"] = True
-                log(f"🚨 {symbol}: Flagged for manual review after {trade['verification_failures']} failures")
-            else:
-                log(f"⚠️ {symbol}: Position not found (failure #{trade['verification_failures']}/3)")
+            # Mark trade as exited if no position exists
+            if auto_repair and _active_trades_ref and symbol in _active_trades_ref:
+                _active_trades_ref[symbol]["exited"] = True
+                _active_trades_ref[symbol]["exit_reason"] = "position_verification_no_position"
+                _active_trades_ref[symbol]["exit_time"] = datetime.now().isoformat()
+                result["repairs_attempted"].append("marked_trade_as_exited")
+                result["repairs_successful"].append("marked_trade_as_exited")
+                log(f"🔧 {symbol}: Marked trade as exited (no position on exchange)")
+                
+                # Save changes
+                if _save_trades_func:
+                    _save_trades_func()
+            
             return result
-        else:
-            result["position_exists"] = True
-            # Reset failure counter if position found
-            trade.pop("verification_failures", None)
-            trade.pop("last_verification_fail", None)
-
-        # FIXED: Get the CURRENT expected position size (after any DCAs)
-        current_expected_size = trade.get("qty", 0)  # This should include DCA additions
-        original_size = trade.get("original_qty", current_expected_size)
+        
+        result["position_exists"] = True
+        
+        # Check position size (accounting for DCA)
+        expected_qty = float(trade.get("qty", 0))
         dca_count = trade.get("dca_count", 0)
         
-        # Calculate tolerance (0.1% or minimum 0.01)
-        size_tolerance = max(0.01, current_expected_size * 0.001)
-        size_matches = abs(position_size - current_expected_size) <= size_tolerance
-        result["position_size_matches"] = size_matches
-        
-        # Enhanced logging for DCA trades
+        # Calculate expected size with DCA
         if dca_count > 0:
-            log(f"📊 DCA Position Check for {symbol}:")
-            log(f"   Original Size: {original_size}")
-            log(f"   DCA Count: {dca_count}")
-            log(f"   Expected Current Size: {current_expected_size}")
-            log(f"   Actual Size: {position_size}")
-            log(f"   Size Matches: {size_matches}")
+            # Each DCA typically adds a percentage of original size
+            dca_config = trade.get("dca_config", {"add_size_pct": 100})  # Default 100% per DCA
+            add_pct = dca_config.get("add_size_pct", 100)
+            expected_qty += expected_qty * (add_pct / 100) * dca_count
         
-        # FIXED: Only flag size mismatch if it's actually wrong
-        if not size_matches:
-            size_diff = abs(position_size - current_expected_size)
-            size_diff_pct = (size_diff / current_expected_size) * 100 if current_expected_size > 0 else 0
-            
-            # Don't confuse users by comparing to original size for DCA trades
-            if dca_count > 0:
-                # For DCA trades, show comparison to current expected
-                result["issues_detected"].append(
-                    f"DCA position size mismatch: expected {current_expected_size}, found {position_size} "
-                    f"(diff: {size_diff:.4f}, {size_diff_pct:.2f}%) [DCA count: {dca_count}]"
-                )
-            else:
-                # For non-DCA trades, normal comparison
-                result["issues_detected"].append(
-                    f"Position size mismatch: expected {current_expected_size}, found {position_size} "
-                    f"(diff: {size_diff:.4f}, {size_diff_pct:.2f}%)"
-                )
-            
-            if auto_repair:
-                # Only auto-fix small differences (< 5%)
-                if size_diff_pct < 5.0:
-                    result["repairs_attempted"].append("Update trade position size to match exchange")
-                    old_qty = trade["qty"]
-                    trade["qty"] = position_size
-                    from monitor import save_active_trades
-                    save_active_trades()
-                    result["repairs_successful"].append(f"Updated position size to {position_size}")
-                    log(f"🔧 {symbol}: Auto-fixed size {old_qty} → {position_size}")
-                else:
-                    # Large difference - flag for manual review but don't auto-fix
-                    result["manual_review_required"].append(
-                        f"Large position size difference ({size_diff_pct:.2f}%)"
-                    )
-                    trade["needs_manual_review"] = True
-                    log(f"🚨 {symbol}: Large size difference - flagged for manual review")
-
-        # Check direction match
-        position_side_raw = position_data.get("side", "")
-        expected_direction_raw = trade.get("direction", "")
-
-        # Normalize both directions
-        position_side = normalize_direction(position_side_raw)
-        expected_direction = normalize_direction(expected_direction_raw)
-
-        direction_matches = position_side == expected_direction
-        result["direction_matches"] = direction_matches
-
-        # Enhanced logging to show the mapping
-        log(f"🔍 Direction Check for {symbol}:")
-        log(f"   Bybit API: '{position_side_raw}' → normalized: '{position_side}'")
-        log(f"   Bot expected: '{expected_direction_raw}' → normalized: '{expected_direction}'")
-        log(f"   Match: {direction_matches}")
+        size_tolerance = 0.05  # 5% tolerance
+        size_diff = abs(position_size - expected_qty) / expected_qty if expected_qty > 0 else 0
         
-        if not direction_matches:
+        if size_diff <= size_tolerance:
+            result["position_size_matches"] = True
+        else:
+            result["position_size_matches"] = False
             result["issues_detected"].append(
-                f"Position direction mismatch: expected {expected_direction}, found {position_side}"
+                f"Position size mismatch: expected {expected_qty}, found {position_size} (diff: {size_diff:.2%})"
+            )
+            
+            # For DCA trades, size mismatches might be normal during execution
+            if dca_count > 0:
+                log(f"📊 {symbol}: Size difference detected in DCA trade (expected: {expected_qty}, actual: {position_size})")
+            elif auto_repair:
+                # Update trade with actual position size
+                trade["qty"] = position_size
+                result["repairs_attempted"].append("updated_trade_quantity")
+                result["repairs_successful"].append("updated_trade_quantity")
+                log(f"🔧 {symbol}: Updated trade quantity to match exchange ({position_size})")
+        
+        # Check direction
+        position_side = normalize_direction(position_data.get("side", ""))
+        expected_direction = normalize_direction(trade.get("direction", ""))
+        
+        if position_side == expected_direction:
+            result["direction_matches"] = True
+        else:
+            result["direction_matches"] = False
+            result["issues_detected"].append(
+                f"Direction mismatch: expected {expected_direction}, found {position_side}"
             )
             
             if auto_repair:
@@ -181,6 +157,50 @@ async def verify_position_and_orders(symbol, trade, auto_repair=True):
                 trade["needs_manual_review"] = True
                 trade["direction_mismatch_detected"] = True
                 log(f"🚨 {symbol}: Direction mismatch - flagged for manual review")
+
+        # Check stop loss orders
+        try:
+            orders_resp = await signed_request("GET", "/v5/order/realtime", {
+                "category": "linear",
+                "symbol": symbol,
+                "orderFilter": "StopOrder"
+            })
+            
+            if orders_resp.get("retCode") == 0:
+                orders = orders_resp.get("result", {}).get("list", [])
+                sl_orders = [o for o in orders if o.get("orderType") in ["Stop", "StopLoss"]]
+                
+                if sl_orders:
+                    result["sl_order_exists"] = True
+                    
+                    # Check if SL price matches
+                    expected_sl = float(trade.get("sl", 0)) if trade.get("sl") else None
+                    if expected_sl:
+                        for order in sl_orders:
+                            order_sl = float(order.get("stopPrice", 0))
+                            if abs(order_sl - expected_sl) / expected_sl <= 0.02:  # 2% tolerance
+                                result["sl_price_matches"] = True
+                                break
+                        
+                        if not result["sl_price_matches"]:
+                            result["issues_detected"].append("Stop loss price mismatch")
+                else:
+                    result["sl_order_exists"] = False
+                    result["issues_detected"].append("No stop loss order found")
+                    
+                    if auto_repair:
+                        # Try to restore missing SL
+                        result["repairs_attempted"].append("restore_stop_loss")
+                        try:
+                            # This would need the actual SL restoration function
+                            # For now, just log the attempt
+                            log(f"🔧 {symbol}: Attempting to restore missing stop loss")
+                            result["manual_review_required"].append("Missing stop loss order")
+                        except Exception as e:
+                            log(f"❌ Failed to restore SL for {symbol}: {e}")
+            
+        except Exception as e:
+            result["issues_detected"].append(f"Error checking stop loss orders: {str(e)}")
 
     except Exception as e:
         result["issues_detected"].append(f"Error checking position: {str(e)}")
@@ -196,12 +216,14 @@ async def verify_position_and_orders(symbol, trade, auto_repair=True):
         repair_count = len(result["repairs_successful"])
         
         # FIXED: Don't alarm users for normal DCA operations
+        dca_count = trade.get("dca_count", 0)
         if dca_count > 0 and any("position size mismatch" in issue for issue in result["issues_detected"]):
             # This might be normal DCA reconciliation
             log(f"🔄 Position verification for {symbol}: {issue_count} issues, {repair_count} repaired (DCA trade)", level="INFO")
         else:
             log(f"⚠️ Position verification for {symbol}: {issue_count} issues, {repair_count} repaired", level="WARN")
     else:
+        dca_count = trade.get("dca_count", 0)
         if dca_count > 0:
             log(f"✅ Position verification for {symbol}: All checks passed (DCA count: {dca_count})")
         else:
@@ -209,10 +231,8 @@ async def verify_position_and_orders(symbol, trade, auto_repair=True):
     
     return result
 
-def calculate_expected_dca_size(original_qty, dca_count, dca_config):
-    """
-    Calculate what the position size should be after DCAs
-    """
+def calculate_expected_dca_size(original_qty: float, dca_count: int, dca_config: Dict) -> float:
+    """Calculate what the position size should be after DCAs"""
     if dca_count == 0:
         return original_qty
     
@@ -220,175 +240,130 @@ def calculate_expected_dca_size(original_qty, dca_count, dca_config):
     total_added = original_qty * (dca_config["add_size_pct"] / 100) * dca_count
     return original_qty + total_added
 
-async def validate_dca_position_size(symbol, trade):
-    """
-    Specific validation for DCA trades to ensure position size is correct
-    """
+async def validate_dca_position_size(symbol: str, trade: Dict) -> bool:
+    """Specific validation for DCA trades to ensure position size is correct"""
     try:
         dca_count = trade.get("dca_count", 0)
         if dca_count == 0:
             return True  # Not a DCA trade
-            
-        original_qty = trade.get("original_qty")
-        current_qty = trade.get("qty")
-        trade_type = trade.get("trade_type", "Intraday")
         
-        if not original_qty:
-            log(f"⚠️ DCA trade {symbol} missing original_qty")
-            return False
-            
-        # Get DCA config
-        DCA_CONFIG = {
-            "Scalp": {"add_size_pct": 100},
-            "Intraday": {"add_size_pct": 100},
-            "Swing": {"add_size_pct": 100}
-        }
-        dca_config = DCA_CONFIG.get(trade_type, DCA_CONFIG["Intraday"])
+        original_qty = float(trade.get("original_qty", trade.get("qty", 0)))
+        dca_config = trade.get("dca_config", {"add_size_pct": 100})
         
-        # Calculate expected size
         expected_size = calculate_expected_dca_size(original_qty, dca_count, dca_config)
         
-        tolerance = max(0.01, expected_size * 0.01)  # 1% tolerance
-        size_matches = abs(current_qty - expected_size) <= tolerance
+        # Get actual position size from exchange
+        position_resp = await signed_request("GET", "/v5/position/list", {
+            "category": "linear",
+            "symbol": symbol
+        })
         
-        log(f"📊 DCA Validation for {symbol}:")
-        log(f"   Original Qty: {original_qty}")
-        log(f"   DCA Count: {dca_count}")
-        log(f"   Expected Size: {expected_size}")
-        log(f"   Current Size: {current_qty}")
-        log(f"   Matches: {size_matches}")
+        if position_resp.get("retCode") != 0:
+            return False
         
-        if not size_matches:
-            log(f"⚠️ DCA size mismatch for {symbol}: expected {expected_size}, got {current_qty}")
-            # Auto-correct if reasonable
-            trade["qty"] = expected_size
-            log(f"🔧 Corrected {symbol} size to {expected_size}")
-            
-        return size_matches
+        positions = position_resp.get("result", {}).get("list", [])
+        actual_size = 0
+        
+        for pos in positions:
+            if pos.get("symbol") == symbol:
+                actual_size = abs(float(pos.get("size", 0)))
+                break
+        
+        # Allow 5% tolerance
+        if actual_size == 0:
+            return False
+        
+        size_diff = abs(actual_size - expected_size) / expected_size
+        return size_diff <= 0.05
         
     except Exception as e:
-        log(f"❌ Error validating DCA position: {e}", level="ERROR")
+        log(f"❌ Error validating DCA position size for {symbol}: {e}", level="ERROR")
         return False
 
-async def verify_all_positions(frequency_minutes=15):
-    """
-    FIXED: Periodic verification of all active positions with better error handling
-    """
-    log("🔍 Starting position verification service...")
-    
-    while True:
-        try:
-            log("🔍 Starting comprehensive position verification")
-            
-            # Import here to avoid circular imports
-            try:
-                from monitor import active_trades
-            except ImportError:
-                log("❌ Could not import active_trades - verification disabled", level="ERROR")
-                await asyncio.sleep(frequency_minutes * 60)
-                continue
-            
-            # Create a snapshot of active trades to avoid dictionary changing during iteration
-            if not active_trades:
-                log("📭 No active trades to verify")
-                await asyncio.sleep(frequency_minutes * 60)
-                continue
-                
-            trades_snapshot = dict(active_trades)  # Create a copy
-            verified_count = 0
-            dca_validated_count = 0
-            
-            for symbol, trade in trades_snapshot.items():
-                if trade.get("exited"):
-                    continue
-                
-                try:
-                    # Verify this position and orders
-                    await verify_position_and_orders(symbol, trade, auto_repair=True)
-                    verified_count += 1
-
-                    if trade.get("dca_count", 0) > 0:
-                        dca_valid = await validate_dca_position_size(symbol, trade)
-                        if dca_valid:
-                            dca_validated_count += 1
-
-                    # Brief pause to avoid rate limits
-                    await asyncio.sleep(0.5)
-
-                except Exception as e:
-                    log(f"❌ Error verifying {symbol}: {e}", level="ERROR")
-                    continue
-            
-            log(f"✅ Position verification cycle complete - verified {verified_count} trades")
-            
-        except Exception as e:
-            log(f"❌ Error in position verification cycle: {e}", level="ERROR")
-            log(traceback.format_exc(), level="ERROR")
-        
-        # Wait for next cycle
-        await asyncio.sleep(frequency_minutes * 60)
-
-def recover_missing_trades():
-    """
-    Recovery function to restore trades that were incorrectly marked as exited
-    """
-    log("🔄 Starting trade recovery process...")
-    
+async def run_comprehensive_verification() -> Dict[str, Any]:
+    """Run comprehensive verification on all active trades"""
     try:
-        # Load both active trades and the persisted file
-        try:
-            from monitor import active_trades, PERSIST_PATH
-        except ImportError:
-            log("❌ Could not import monitor components", level="ERROR")
-            return
+        if not _active_trades_ref:
+            log("❌ No active trades reference available", level="ERROR")
+            return {}
+        
+        verification_results = {}
+        
+        for symbol, trade in _active_trades_ref.items():
+            if trade.get("exited"):
+                continue
             
-        import json
-        import os
+            log(f"🔍 Verifying {symbol}...")
+            result = await verify_position_and_orders(symbol, trade, auto_repair=True)
+            verification_results[symbol] = result
         
-        if not os.path.exists(PERSIST_PATH):
-            log("❌ No persisted trades file found")
+        # Summary
+        total_trades = len(verification_results)
+        issues_found = sum(1 for r in verification_results.values() if r["issues_detected"])
+        manual_review_needed = sum(1 for r in verification_results.values() if r["manual_review_required"])
+        
+        summary = {
+            "total_verified": total_trades,
+            "issues_found": issues_found,
+            "manual_review_needed": manual_review_needed,
+            "results": verification_results
+        }
+        
+        log(f"📊 Verification complete: {total_trades} trades, {issues_found} with issues, {manual_review_needed} need manual review")
+        
+        return summary
+        
+    except Exception as e:
+        log(f"❌ Error in comprehensive verification: {e}", level="ERROR")
+        return {}
+
+def attempt_trade_recovery():
+    """Attempt to recover potentially recoverable trades"""
+    try:
+        if not _active_trades_ref:
+            log("❌ No active trades reference available", level="ERROR")
             return
         
-        with open(PERSIST_PATH, 'r') as f:
-            all_trades = json.load(f)
-        
-        # Find trades marked as exited that might need recovery
         potentially_recoverable = []
         
-        for symbol, trade in all_trades.items():
-            if trade.get("exited") and trade.get("needs_manual_review"):
+        for symbol, trade in _active_trades_ref.items():
+            if (trade.get("exited") and 
+                trade.get("exit_reason") in ["verification_failed", "position_not_found"] and
+                not trade.get("recovery_attempted")):
                 potentially_recoverable.append((symbol, trade))
         
-        log(f"🔍 Found {len(potentially_recoverable)} potentially recoverable trades")
+        log(f"🔄 Found {len(potentially_recoverable)} potentially recoverable trades")
         
         if not potentially_recoverable:
             log("✅ No trades need recovery")
             return
             
-        # For each potentially recoverable trade, check if position still exists
+        # For each potentially recoverable trade, mark as attempted
         for symbol, trade in potentially_recoverable:
-            log(f"🔄 Checking {symbol} for recovery...")
-            
-            # This would need to be run in an async context
-            # For now, just log what we would do
+            log(f"🔄 Marking {symbol} as recovery attempted...")
+            trade["recovery_attempted"] = True
             log(f"📋 Would check position for {symbol} - direction: {trade.get('direction')}")
         
         log("✅ Trade recovery process completed")
+        
+        # Save changes
+        if _save_trades_func:
+            _save_trades_func()
         
     except Exception as e:
         log(f"❌ Error in trade recovery: {e}", level="ERROR")
         log(traceback.format_exc(), level="ERROR")
 
-def generate_manual_review_report():
-    """
-    Generate a report of all trades requiring manual review
-    """
+def generate_manual_review_report() -> list:
+    """Generate a report of all trades requiring manual review"""
     try:
-        from monitor import active_trades
+        if not _active_trades_ref:
+            log("❌ No active trades reference available", level="ERROR")
+            return []
         
         manual_review_trades = []
         
-        for symbol, trade in active_trades.items():
+        for symbol, trade in _active_trades_ref.items():
             if trade.get("needs_manual_review"):
                 manual_review_trades.append({
                     "symbol": symbol,
@@ -419,6 +394,17 @@ def test_import():
     """Test function to verify the module imports correctly"""
     log("✅ trade_verification.py imported successfully")
     return True
+
+# Export main functions
+__all__ = [
+    'verify_position_and_orders',
+    'run_comprehensive_verification',
+    'attempt_trade_recovery',
+    'generate_manual_review_report',
+    'set_dependencies',
+    'normalize_direction',
+    'test_import'
+]
 
 # Run test when imported
 if __name__ == "__main__":

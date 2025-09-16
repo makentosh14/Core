@@ -1,210 +1,71 @@
-# monitor.py - FIXED VERSION
-# Remove all duplicate exit logic and use unified exit manager
+#!/usr/bin/env python3
+"""
+FIXED monitor.py - Complete imports and dependency setup
+"""
 
-import json
-import os
-import time
-startup_time = time.time()
 import asyncio
+import json
+import time
 import traceback
-from datetime import datetime, timedelta
-from score import score_symbol
-from pattern_detector import detect_pattern
-from volume import get_average_volume
+from datetime import datetime
+from typing import Dict, Any, Optional
 from logger import log, write_log
-from exit_manager import should_trail_stop, adjust_profit_protection, should_exit_by_time, evaluate_score_exit, detect_momentum_surge, calculate_exit_tranches
-from config import ENABLE_AUTO_REENTRY, REENTRY_FEATURES
-from auto_reentry import (
-    log_exit, 
-    update_exit_cooldowns, 
-    update_reentry_performance,
-    should_reenter,
-    handle_reentry,
-    cooldown_exits,
-    exit_history
-)
-from ai_memory import log_trade_result
-from activity_logger import log_trade_to_file
-from bybit_api import signed_request, check_order_exists, place_stop_loss, place_stop_loss_with_retry, place_market_order
-from error_handler import send_telegram_message
-from strategy_performance import log_strategy_result
-from sl_tp_utils import evaluate_score_exit
-from dca_manager import dca_manager
-from auto_exit_handler import auto_exit_past_sl
+from bybit_api import signed_request
+from error_handler import send_telegram_message, send_error_to_telegram
 
-# IMPORT THE UNIFIED EXIT MANAGER - This replaces all exit logic
-from unified_exit_manager import process_trade_exits
+# Configuration
+ENABLE_AUTO_REENTRY = False
+EXIT_COOLDOWN = 300  # 5 minutes
 
-_last_monitor_save = 0
-_monitor_save_cooldown = 5  # 5 seconds
+# Global state
+active_trades: Dict[str, Any] = {}
+recent_exits: Dict[str, float] = {}
+startup_time = time.time()
 
-# Active trades dictionary
-active_trades = {}
-
-PERSIST_PATH = "active_trades.json"
+# Initialize dependencies for other modules
+def setup_module_dependencies():
+    """Setup dependencies for modules to avoid circular imports"""
+    try:
+        # Setup trade verification dependencies
+        from trade_verification import set_dependencies as set_verification_deps
+        set_verification_deps(save_active_trades, active_trades)
+        
+        # Setup unified exit manager dependencies
+        from unified_exit_manager import set_dependencies as set_exit_deps
+        set_exit_deps(save_active_trades, update_stop_loss_order)
+        
+        log("✅ Module dependencies initialized")
+        
+    except ImportError as e:
+        log(f"⚠️ Some modules not available for dependency setup: {e}")
+    except Exception as e:
+        log(f"❌ Error setting up module dependencies: {e}", level="ERROR")
 
 def load_active_trades():
     """Load active trades from file"""
     global active_trades
     try:
-        if os.path.exists(PERSIST_PATH):
-            with open(PERSIST_PATH, 'r') as f:
-                active_trades = json.load(f)
-                
-            # Filter out exited trades
-            active_trades = {k: v for k, v in active_trades.items() if not v.get("exited", False)}
-            log(f"📊 Loaded {len(active_trades)} active trades")
-        else:
-            active_trades = {}
-            log("📊 No existing trades file found, starting fresh")
+        with open("active_trades.json", "r") as f:
+            active_trades = json.load(f)
+        log(f"✅ Loaded {len(active_trades)} active trades from file")
+    except FileNotFoundError:
+        active_trades = {}
+        log("📁 No active trades file found, starting fresh")
     except Exception as e:
         log(f"❌ Error loading active trades: {e}", level="ERROR")
         active_trades = {}
 
 def save_active_trades():
-    """Save active trades to file with cooldown"""
-    global _last_monitor_save
-    current_time = time.time()
-    
-    if current_time - _last_monitor_save < _monitor_save_cooldown:
-        return  # Skip save due to cooldown
-    
+    """Save active trades to file"""
     try:
-        with open(PERSIST_PATH, 'w') as f:
+        with open("active_trades.json", "w") as f:
             json.dump(active_trades, f, indent=2)
-        _last_monitor_save = current_time
-        
+        log(f"💾 Saved {len(active_trades)} active trades to file")
     except Exception as e:
         log(f"❌ Error saving active trades: {e}", level="ERROR")
 
-def track_active_trade(symbol, trade_data):
-    """Add a trade to active monitoring"""
-    global active_trades
-    active_trades[symbol] = trade_data
-    log(f"📊 Now tracking {symbol}: {trade_data.get('direction')} @ {trade_data.get('entry_price')}")
-    save_active_trades()
-
-async def monitor_trades(live_candles=None):
-    """
-    MAIN MONITORING FUNCTION - FIXED VERSION
-    Uses unified exit manager to prevent double logic
-    """
-    if not active_trades:
-        return
-    
-    log(f"📊 Monitoring {len(active_trades)} active trades...")
-    
-    for symbol, trade in list(active_trades.items()):
-        try:
-            # Skip if trade is already exited
-            if trade.get("exited"):
-                continue
-            
-            # Get current price
-            current_price = await get_symbol_price(symbol)
-            if not current_price:
-                continue
-            
-            # Get recent candles for analysis
-            candles_by_tf = await get_candles_for_monitoring(symbol)
-            candles_1m = candles_by_tf.get('1', [])
-            
-            # USE UNIFIED EXIT MANAGER - Single source of truth
-            trade_modified = await process_trade_exits(
-                symbol=symbol,
-                trade=trade,
-                current_price=current_price,
-                candles=candles_1m
-            )
-            
-            if trade_modified:
-                log(f"🔄 Trade {symbol} was modified by exit manager")
-                # Trade state is automatically saved by unified exit manager
-            
-            # Continue to next trade if this one was exited
-            if trade.get("exited"):
-                continue
-            
-            # Check for original SL hit (only before TP1)
-            if not trade.get("tp1_hit") and trade.get("original_sl"):
-                direction = trade.get("direction", "").lower()
-                if check_original_sl_hit(trade, current_price, direction):
-                    await handle_original_sl_exit(symbol, trade, current_price)
-                    continue
-            
-            # Handle auto-reentry logic if enabled
-            if ENABLE_AUTO_REENTRY and trade.get("exited"):
-                await handle_reentry_logic(symbol, trade, current_price)
-            
-        except Exception as e:
-            log(f"❌ Error monitoring {symbol}: {e}", level="ERROR")
-            log(traceback.format_exc(), level="ERROR")
-    
-    # Save any changes
-    save_active_trades()
-
-def check_original_sl_hit(trade, current_price, direction):
-    """Check if original SL (before TP1) has been hit"""
-    original_sl = trade.get("original_sl")
-    if not original_sl:
-        return False
-    
-    buffer = 0.001  # 0.1% buffer
-    
-    if direction == "long":
-        return current_price <= original_sl * (1 - buffer)
-    else:  # short
-        return current_price >= original_sl * (1 + buffer)
-
-async def handle_original_sl_exit(symbol, trade, current_price):
-    """Handle original SL hit (before TP1)"""
-    try:
-        log(f"🛑 Original SL hit for {symbol} at {current_price}")
-        
-        direction = trade.get("direction", "").lower()
-        entry_price = trade.get("entry_price")
-        qty = trade.get("qty", 0)
-        
-        # Calculate loss
-        if direction == "long":
-            loss_pct = ((current_price - entry_price) / entry_price) * 100
-        else:
-            loss_pct = ((entry_price - current_price) / entry_price) * 100
-        
-        # Execute exit
-        exit_side = "Sell" if direction == "long" else "Buy"
-        
-        exit_order = await place_market_order(
-            symbol=symbol,
-            side=exit_side,
-            qty=qty,
-            reduce_only=True
-        )
-        
-        if exit_order:
-            # Mark trade as exited
-            trade["exited"] = True
-            trade["exit_price"] = current_price
-            trade["exit_reason"] = "Original_SL_Hit"
-            trade["profit_pct"] = loss_pct
-            trade["exit_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
-            # Send notification
-            await send_telegram_message(
-                f"🛑 <b>Stop Loss Hit</b> - <b>{symbol}</b>\n"
-                f"💰 Exit Price: {current_price:.6f}\n"
-                f"📈 Loss: {loss_pct:.2f}%"
-            )
-            
-            log(f"✅ Original SL exit executed for {symbol}")
-        else:
-            log(f"❌ Failed to execute original SL exit for {symbol}", level="ERROR")
-            
-    except Exception as e:
-        log(f"❌ Error handling original SL exit for {symbol}: {e}", level="ERROR")
-
-async def get_symbol_price(symbol):
-    """Get current symbol price"""
+async def get_current_price(symbol: str) -> Optional[float]:
+    """Get current price for a symbol"""
     try:
         result = await signed_request("GET", "/v5/market/tickers", {
             "category": "linear",
@@ -223,7 +84,7 @@ async def get_symbol_price(symbol):
         log(f"❌ Error getting price for {symbol}: {e}", level="ERROR")
         return None
 
-async def get_candles_for_monitoring(symbol):
+async def get_candles_for_monitoring(symbol: str) -> Dict[str, list]:
     """Get candles for monitoring analysis"""
     try:
         # Import here to avoid circular imports
@@ -239,17 +100,194 @@ async def get_candles_for_monitoring(symbol):
         log(f"❌ Error getting candles for {symbol}: {e}", level="ERROR")
         return {"1": []}
 
-async def handle_reentry_logic(symbol, trade, current_price):
+async def update_stop_loss_order(symbol: str, trade: Dict, new_sl: float) -> bool:
+    """Update stop loss order on exchange"""
+    try:
+        # Get existing stop loss order
+        orders_response = await signed_request("GET", "/v5/order/realtime", {
+            "category": "linear",
+            "symbol": symbol,
+            "orderFilter": "StopOrder"
+        })
+        
+        if orders_response.get("retCode") != 0:
+            log(f"❌ Failed to get orders for {symbol}: {orders_response.get('retMsg')}")
+            return False
+        
+        orders = orders_response.get("result", {}).get("list", [])
+        sl_orders = [o for o in orders if o.get("orderType") in ["Stop", "StopLoss"]]
+        
+        if not sl_orders:
+            log(f"⚠️ No existing SL order found for {symbol}")
+            return False
+        
+        # Cancel existing SL order
+        sl_order = sl_orders[0]
+        cancel_response = await signed_request("POST", "/v5/order/cancel", {
+            "category": "linear",
+            "symbol": symbol,
+            "orderId": sl_order.get("orderId")
+        })
+        
+        if cancel_response.get("retCode") != 0:
+            log(f"❌ Failed to cancel SL order for {symbol}")
+            return False
+        
+        # Place new SL order
+        direction = trade.get("direction", "").lower()
+        qty = trade.get("qty", 0)
+        
+        side = "Sell" if direction == "long" else "Buy"
+        
+        new_sl_response = await signed_request("POST", "/v5/order/create", {
+            "category": "linear",
+            "symbol": symbol,
+            "side": side,
+            "orderType": "Stop",
+            "qty": str(abs(float(qty))),
+            "stopPrice": str(new_sl),
+            "timeInForce": "GTC",
+            "reduceOnly": True
+        })
+        
+        if new_sl_response.get("retCode") == 0:
+            trade["sl_order_id"] = new_sl_response.get("result", {}).get("orderId")
+            log(f"✅ Updated SL order for {symbol} to {new_sl}")
+            return True
+        else:
+            log(f"❌ Failed to place new SL order for {symbol}: {new_sl_response.get('retMsg')}")
+            return False
+        
+    except Exception as e:
+        log(f"❌ Error updating SL order for {symbol}: {e}", level="ERROR")
+        return False
+
+async def check_and_restore_sl(symbol: str, trade: Dict) -> bool:
+    """Check and restore stop loss for a trade"""
+    try:
+        if not trade or trade.get("exited"):
+            return False
+        
+        log(f"🔍 Checking SL for {symbol}")
+        
+        # Check if SL order exists on exchange
+        orders_response = await signed_request("GET", "/v5/order/realtime", {
+            "category": "linear", 
+            "symbol": symbol,
+            "orderFilter": "StopOrder"
+        })
+        
+        if orders_response.get("retCode") != 0:
+            log(f"❌ Failed to check SL orders for {symbol}")
+            return False
+        
+        orders = orders_response.get("result", {}).get("list", [])
+        sl_orders = [o for o in orders if o.get("orderType") in ["Stop", "StopLoss"]]
+        
+        if sl_orders:
+            log(f"✅ SL order exists for {symbol}")
+            return True
+        
+        # No SL order found - try to restore
+        expected_sl = trade.get("sl")
+        if not expected_sl:
+            log(f"⚠️ No SL price stored for {symbol}")
+            return False
+        
+        log(f"🔧 Restoring missing SL for {symbol} at {expected_sl}")
+        
+        direction = trade.get("direction", "").lower()
+        qty = trade.get("qty", 0)
+        side = "Sell" if direction == "long" else "Buy"
+        
+        sl_response = await signed_request("POST", "/v5/order/create", {
+            "category": "linear",
+            "symbol": symbol,
+            "side": side,
+            "orderType": "Stop",
+            "qty": str(abs(float(qty))),
+            "stopPrice": str(expected_sl),
+            "timeInForce": "GTC",
+            "reduceOnly": True
+        })
+        
+        if sl_response.get("retCode") == 0:
+            trade["sl_order_id"] = sl_response.get("result", {}).get("orderId")
+            log(f"✅ Restored SL order for {symbol}")
+            save_active_trades()
+            return True
+        else:
+            log(f"❌ Failed to restore SL for {symbol}: {sl_response.get('retMsg')}")
+            return False
+        
+    except Exception as e:
+        log(f"❌ Error checking/restoring SL for {symbol}: {e}", level="ERROR")
+        return False
+
+async def handle_reentry_logic(symbol: str, trade: Dict, current_price: float):
     """Handle auto-reentry logic if enabled"""
     try:
         if not ENABLE_AUTO_REENTRY:
             return
         
-        # Auto-reentry logic here if needed
-        # This is where your existing reentry code would go
+        # Skip if recently exited
+        if symbol in recent_exits:
+            time_diff = time.time() - recent_exits[symbol]
+            if time_diff < EXIT_COOLDOWN:
+                return
+        
+        # Add reentry logic here if needed in the future
+        log(f"🔄 Auto-reentry check for {symbol} (currently disabled)")
         
     except Exception as e:
         log(f"❌ Error in reentry logic for {symbol}: {e}", level="ERROR")
+
+async def monitor_active_trades():
+    """Main monitoring loop for active trades"""
+    while True:
+        try:
+            if not active_trades:
+                await asyncio.sleep(10)
+                continue
+            
+            log(f"🔍 Monitoring {len(active_trades)} active trades")
+            
+            for symbol, trade in list(active_trades.items()):
+                try:
+                    if trade.get("exited"):
+                        continue
+                    
+                    # Get current price
+                    current_price = await get_current_price(symbol)
+                    if not current_price:
+                        continue
+                    
+                    # Use unified exit manager for all exit logic
+                    from unified_exit_manager import process_trade_exits
+                    exited = await process_trade_exits(symbol, trade, current_price)
+                    
+                    if exited:
+                        # Add to recent exits for cooldown
+                        recent_exits[symbol] = time.time()
+                        
+                        # Handle reentry logic if enabled
+                        await handle_reentry_logic(symbol, trade, current_price)
+                    
+                except Exception as e:
+                    log(f"❌ Error monitoring {symbol}: {e}", level="ERROR")
+                    continue
+            
+            # Clean up old recent exits
+            current_time = time.time()
+            expired_exits = [s for s, t in recent_exits.items() if current_time - t > EXIT_COOLDOWN]
+            for symbol in expired_exits:
+                del recent_exits[symbol]
+            
+            await asyncio.sleep(10)  # Check every 10 seconds
+            
+        except Exception as e:
+            log(f"❌ Error in monitoring loop: {e}", level="ERROR")
+            await asyncio.sleep(20)
 
 async def periodic_trade_sync():
     """Periodic trade sync function - called from main.py"""
@@ -264,148 +302,47 @@ async def periodic_trade_sync():
             load_active_trades()
             log(f"🔄 Periodic sync: {len(active_trades)} active trades")
             
+            # Run verification on all trades
+            try:
+                from trade_verification import run_comprehensive_verification
+                verification_results = await run_comprehensive_verification()
+                
+                if verification_results.get("manual_review_needed", 0) > 0:
+                    log(f"⚠️ {verification_results['manual_review_needed']} trades need manual review")
+                
+            except ImportError:
+                log("⚠️ Trade verification not available")
+            except Exception as e:
+                log(f"❌ Error in trade verification: {e}", level="ERROR")
+            
         except Exception as e:
             log(f"❌ Error in periodic trade sync: {e}", level="ERROR")
         
         # Sync every 60 seconds
         await asyncio.sleep(60)
 
-# This function should already exist - if not, add it:
-async def check_and_restore_sl(symbol, trade):
-    """Check and restore stop loss for a trade"""
-    try:
-        if not trade or trade.get("exited"):
-            return False
-        
-        log(f"🔍 Checking SL for {symbol}")
-        
-        # Add your SL check logic here
-        # For now, just log that we're checking
-        log(f"✅ SL check completed for {symbol}")
-        return True
-        
-    except Exception as e:
-        log(f"❌ Error checking SL for {symbol}: {e}", level="ERROR")
-        return False
+# Export main functions
+__all__ = [
+    'active_trades',
+    'load_active_trades', 
+    'save_active_trades',
+    'get_current_price',
+    'get_candles_for_monitoring',
+    'update_stop_loss_order',
+    'check_and_restore_sl',
+    'handle_reentry_logic',
+    'monitor_active_trades',
+    'periodic_trade_sync',
+    'setup_module_dependencies'
+]
 
-async def get_current_price(symbol, live_candles=None):
-    """
-    Get current price for symbol with comprehensive null checks
-    FIXED VERSION - Prevents NoneType multiplication errors
-    """
-    try:
-        # Method 1: Try live candles first
-        if live_candles and symbol in live_candles:
-            for tf in ['1', '5', '15']:  # Try different timeframes
-                if tf in live_candles[symbol] and live_candles[symbol][tf]:
-                    candles = live_candles[symbol][tf]
-                    if candles and len(candles) > 0:
-                        last_candle = candles[-1]
-                        if 'close' in last_candle:
-                            price = float(last_candle['close'])
-                            if price > 0:
-                                return price
-        
-        # Method 2: Fetch from API
-        from bybit_api import signed_request
-        result = await signed_request("GET", "/v5/market/tickers", {
-            "category": "linear",
-            "symbol": symbol
-        })
-        
-        if result and result.get("retCode") == 0:
-            tickers = result.get("result", {}).get("list", [])
-            if tickers and len(tickers) > 0:
-                ticker = tickers[0]
-                price = float(ticker.get("lastPrice", 0))
-                if price > 0:
-                    return price
-        
-        log(f"⚠️ Could not get price for {symbol}", level="WARN")
-        return None
-        
-    except Exception as e:
-        log(f"❌ Error getting current price for {symbol}: {e}", level="ERROR")
-        return None
-
-async def get_current_price_enhanced(symbol, live_candles=None):
-    """
-    Enhanced price fetching with additional validation
-    FIXED VERSION - Prevents NoneType errors
-    """
-    try:
-        # Use the base function with null checks
-        price = await get_current_price(symbol, live_candles)
-        
-        if price is None:
-            log(f"⚠️ Price is None for {symbol}, trying backup methods", level="WARN")
-            
-            # Backup method: Try websocket candles module
-            try:
-                from websocket_candles import live_candles as ws_candles
-                if ws_candles and symbol in ws_candles:
-                    for tf in ['1', '5']:
-                        if tf in ws_candles[symbol] and ws_candles[symbol][tf]:
-                            candles = ws_candles[symbol][tf]
-                            if candles and len(candles) > 0:
-                                last_candle = candles[-1]
-                                if 'close' in last_candle:
-                                    backup_price = float(last_candle['close'])
-                                    if backup_price > 0:
-                                        log(f"✅ Got backup price for {symbol}: {backup_price}")
-                                        return backup_price
-            except Exception as backup_error:
-                log(f"⚠️ Backup price method failed for {symbol}: {backup_error}", level="WARN")
-            
-            return None
-        
-        # Validate the price
-        if not isinstance(price, (int, float)):
-            log(f"❌ Invalid price type for {symbol}: {type(price)}", level="ERROR")
-            return None
-        
-        if price <= 0:
-            log(f"❌ Invalid price value for {symbol}: {price}", level="ERROR")
-            return None
-        
-        return float(price)
-        
-    except Exception as e:
-        log(f"❌ Error in enhanced price fetch for {symbol}: {e}", level="ERROR")
-        return None
-
-async def get_symbol_price(symbol, category="linear"):
-    """
-    Wrapper function for backward compatibility
-    FIXED VERSION with null checks
-    """
-    try:
-        price = await get_current_price_enhanced(symbol)
-        return price
-    except Exception as e:
-        log(f"❌ Error in get_symbol_price for {symbol}: {e}", level="ERROR")
-        return None
-
-# This function should already exist - if not, add it:
-async def recover_active_trades_from_exchange():
-    """Recover active trades from exchange"""
-    try:
-        log("🔄 Attempting to recover trades from exchange...")
-        
-        # Add your recovery logic here
-        # For now, just log that we're recovering
-        log("✅ Trade recovery completed")
-        
-    except Exception as e:
-        log(f"❌ Error recovering trades: {e}", level="ERROR")
-
-# REMOVED FUNCTIONS - These are now handled by unified_exit_manager.py:
-# - handle_tp1_hit()
-# - handle_trailing_stop()
-# - handle_trailing_sl_hit()
-# - check_tp1_hit()
-# - check_trailing_sl_hit()
-# - update_trailing_stop()
-
-# Initialize on import
-load_active_trades()
+# Initialize module
+if __name__ == "__main__":
+    print("✅ monitor.py module loaded successfully")
+    
+    # Setup dependencies
+    setup_module_dependencies()
+    
+    # Load trades
+    load_active_trades()
+    print(f"📊 {len(active_trades)} active trades loaded")

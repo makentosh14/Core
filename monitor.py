@@ -162,6 +162,150 @@ async def update_stop_loss_order(symbol: str, trade: Dict, new_sl: float) -> boo
         log(f"❌ Error updating SL order for {symbol}: {e}", level="ERROR")
         return False
 
+async def track_active_trade(symbol: str, trade_data: Dict[str, Any]) -> None:
+    """Track an active trade - called when trade is executed"""
+    try:
+        active_trades[symbol] = trade_data
+        save_active_trades()
+        log(f"📌 Now tracking {symbol}: {trade_data.get('direction', 'Unknown')} | Score: {trade_data.get('score', 'N/A')}")
+        
+    except Exception as e:
+        log(f"❌ Error tracking trade for {symbol}: {e}", level="ERROR")
+
+async def monitor_trades(score_data: Dict[str, Any]) -> None:
+    """Monitor trades based on current scores - compatibility function"""
+    try:
+        # This is mainly for compatibility with legacy code
+        # The main monitoring is handled by monitor_active_trades()
+        if not score_data:
+            return
+            
+        for symbol in active_trades:
+            if symbol in score_data:
+                current_score = score_data[symbol].get("score", 0)
+                log(f"📊 {symbol} current score: {current_score}")
+        
+    except Exception as e:
+        log(f"❌ Error in monitor_trades: {e}", level="ERROR")
+
+async def check_and_restore_sl(symbol: str, trade: Dict[str, Any]) -> bool:
+    """Check and restore stop loss if missing"""
+    try:
+        log(f"🔍 Checking SL for {symbol}...")
+        
+        # Get current orders
+        orders_response = await signed_request("GET", "/v5/order/realtime", {
+            "category": "linear", 
+            "symbol": symbol,
+            "orderFilter": "StopOrder"
+        })
+        
+        if orders_response.get("retCode") != 0:
+            log(f"❌ Failed to get orders for {symbol}")
+            return False
+            
+        orders = orders_response.get("result", {}).get("list", [])
+        sl_orders = [o for o in orders if o.get("orderType") in ["Stop", "StopLoss"]]
+        
+        if sl_orders:
+            log(f"✅ SL exists for {symbol}")
+            return True
+            
+        # SL missing - try to restore
+        log(f"⚠️ SL missing for {symbol}, attempting restore...")
+        
+        sl_price = trade.get("sl_price") or trade.get("stop_loss")
+        if not sl_price:
+            log(f"❌ No SL price in trade data for {symbol}")
+            return False
+            
+        # Place new SL order
+        direction = trade.get("direction", "")
+        qty = trade.get("qty", "")
+        
+        order_side = "Sell" if direction == "Long" else "Buy"
+        
+        sl_response = await signed_request("POST", "/v5/order/create", {
+            "category": "linear",
+            "symbol": symbol,
+            "side": order_side,
+            "orderType": "Stop",
+            "qty": str(qty),
+            "stopPrice": str(sl_price),
+            "triggerDirection": 1 if direction == "Long" else 2,
+            "timeInForce": "GTC",
+            "reduceOnly": True
+        })
+        
+        if sl_response.get("retCode") == 0:
+            log(f"✅ SL restored for {symbol} at {sl_price}")
+            return True
+        else:
+            log(f"❌ Failed to restore SL for {symbol}: {sl_response.get('retMsg')}")
+            return False
+            
+    except Exception as e:
+        log(f"❌ Error checking/restoring SL for {symbol}: {e}", level="ERROR")
+        return False
+
+async def recover_active_trades_from_exchange() -> None:
+    """Recover active trades from exchange positions and orders"""
+    try:
+        log("🔄 Attempting to recover active trades from exchange...")
+        
+        # Get current positions
+        positions_response = await signed_request("GET", "/v5/position/list", {
+            "category": "linear"
+        })
+        
+        if positions_response.get("retCode") != 0:
+            log(f"❌ Failed to get positions: {positions_response.get('retMsg')}")
+            return
+            
+        positions = positions_response.get("result", {}).get("list", [])
+        active_positions = [p for p in positions if float(p.get("size", 0)) > 0]
+        
+        log(f"📊 Found {len(active_positions)} active positions on exchange")
+        
+        recovered_trades = 0
+        
+        for position in active_positions:
+            symbol = position.get("symbol")
+            size = float(position.get("size", 0))
+            side = position.get("side", "")
+            avg_price = float(position.get("avgPrice", 0))
+            unrealized_pnl = float(position.get("unrealisedPnl", 0))
+            
+            if symbol not in active_trades and size > 0:
+                # Create trade record from position
+                trade_data = {
+                    "symbol": symbol,
+                    "direction": "Long" if side == "Buy" else "Short", 
+                    "qty": str(size),
+                    "entry_price": avg_price,
+                    "timestamp": datetime.now().isoformat(),
+                    "recovered_from_exchange": True,
+                    "unrealized_pnl": unrealized_pnl,
+                    "trade_type": "Recovered",
+                    "score": 0,
+                    "confidence": 0
+                }
+                
+                active_trades[symbol] = trade_data
+                recovered_trades += 1
+                
+                log(f"🔄 Recovered {symbol}: {side} {size} @ {avg_price}")
+        
+        if recovered_trades > 0:
+            save_active_trades()
+            log(f"✅ Recovered {recovered_trades} trades from exchange")
+        else:
+            log("ℹ️ No trades to recover")
+            
+    except Exception as e:
+        log(f"❌ Error recovering trades from exchange: {e}", level="ERROR")
+
+
 async def check_and_restore_sl(symbol: str, trade: Dict) -> bool:
     """Check and restore stop loss for a trade"""
     try:
@@ -321,20 +465,167 @@ async def periodic_trade_sync():
         # Sync every 60 seconds
         await asyncio.sleep(60)
 
+async def track_active_trade(symbol: str, trade_data: Dict[str, Any]) -> None:
+    """Track an active trade - called when trade is executed"""
+    try:
+        active_trades[symbol] = trade_data
+        save_active_trades()
+        log(f"📌 Now tracking {symbol}: {trade_data.get('direction', 'Unknown')} | Score: {trade_data.get('score', 'N/A')}")
+        
+    except Exception as e:
+        log(f"❌ Error tracking trade for {symbol}: {e}", level="ERROR")
+
+async def monitor_trades(score_data: Dict[str, Any]) -> None:
+    """Monitor trades based on current scores - compatibility function"""
+    try:
+        # This is mainly for compatibility with legacy code
+        # The main monitoring is handled by monitor_active_trades()
+        if not score_data:
+            return
+            
+        for symbol in active_trades:
+            if symbol in score_data:
+                current_score = score_data[symbol].get("score", 0)
+                log(f"📊 {symbol} current score: {current_score}")
+        
+    except Exception as e:
+        log(f"❌ Error in monitor_trades: {e}", level="ERROR")
+
+async def check_and_restore_sl(symbol: str, trade: Dict[str, Any]) -> bool:
+    """Check and restore stop loss if missing"""
+    try:
+        log(f"🔍 Checking SL for {symbol}...")
+        
+        # Get current orders
+        orders_response = await signed_request("GET", "/v5/order/realtime", {
+            "category": "linear", 
+            "symbol": symbol,
+            "orderFilter": "StopOrder"
+        })
+        
+        if orders_response.get("retCode") != 0:
+            log(f"❌ Failed to get orders for {symbol}")
+            return False
+            
+        orders = orders_response.get("result", {}).get("list", [])
+        sl_orders = [o for o in orders if o.get("orderType") in ["Stop", "StopLoss"]]
+        
+        if sl_orders:
+            log(f"✅ SL exists for {symbol}")
+            return True
+            
+        # SL missing - try to restore
+        log(f"⚠️ SL missing for {symbol}, attempting restore...")
+        
+        sl_price = trade.get("sl_price") or trade.get("stop_loss")
+        if not sl_price:
+            log(f"❌ No SL price in trade data for {symbol}")
+            return False
+            
+        # Place new SL order
+        direction = trade.get("direction", "")
+        qty = trade.get("qty", "")
+        
+        order_side = "Sell" if direction == "Long" else "Buy"
+        
+        sl_response = await signed_request("POST", "/v5/order/create", {
+            "category": "linear",
+            "symbol": symbol,
+            "side": order_side,
+            "orderType": "Stop",
+            "qty": str(qty),
+            "stopPrice": str(sl_price),
+            "triggerDirection": 1 if direction == "Long" else 2,
+            "timeInForce": "GTC",
+            "reduceOnly": True
+        })
+        
+        if sl_response.get("retCode") == 0:
+            log(f"✅ SL restored for {symbol} at {sl_price}")
+            return True
+        else:
+            log(f"❌ Failed to restore SL for {symbol}: {sl_response.get('retMsg')}")
+            return False
+            
+    except Exception as e:
+        log(f"❌ Error checking/restoring SL for {symbol}: {e}", level="ERROR")
+        return False
+
+async def recover_active_trades_from_exchange() -> None:
+    """Recover active trades from exchange positions and orders"""
+    try:
+        log("🔄 Attempting to recover active trades from exchange...")
+        
+        # Get current positions
+        positions_response = await signed_request("GET", "/v5/position/list", {
+            "category": "linear"
+        })
+        
+        if positions_response.get("retCode") != 0:
+            log(f"❌ Failed to get positions: {positions_response.get('retMsg')}")
+            return
+            
+        positions = positions_response.get("result", {}).get("list", [])
+        active_positions = [p for p in positions if float(p.get("size", 0)) > 0]
+        
+        log(f"📊 Found {len(active_positions)} active positions on exchange")
+        
+        recovered_trades = 0
+        
+        for position in active_positions:
+            symbol = position.get("symbol")
+            size = float(position.get("size", 0))
+            side = position.get("side", "")
+            avg_price = float(position.get("avgPrice", 0))
+            unrealized_pnl = float(position.get("unrealisedPnl", 0))
+            
+            if symbol not in active_trades and size > 0:
+                # Create trade record from position
+                trade_data = {
+                    "symbol": symbol,
+                    "direction": "Long" if side == "Buy" else "Short", 
+                    "qty": str(size),
+                    "entry_price": avg_price,
+                    "timestamp": datetime.now().isoformat(),
+                    "recovered_from_exchange": True,
+                    "unrealized_pnl": unrealized_pnl,
+                    "trade_type": "Recovered",
+                    "score": 0,
+                    "confidence": 0
+                }
+                
+                active_trades[symbol] = trade_data
+                recovered_trades += 1
+                
+                log(f"🔄 Recovered {symbol}: {side} {size} @ {avg_price}")
+        
+        if recovered_trades > 0:
+            save_active_trades()
+            log(f"✅ Recovered {recovered_trades} trades from exchange")
+        else:
+            log("ℹ️ No trades to recover")
+            
+    except Exception as e:
+        log(f"❌ Error recovering trades from exchange: {e}", level="ERROR")
+
 # Export main functions
 __all__ = [
     'active_trades',
     'load_active_trades', 
     'save_active_trades',
+    'track_active_trade',
+    'monitor_trades', 
     'get_current_price',
     'get_candles_for_monitoring',
     'update_stop_loss_order',
     'check_and_restore_sl',
     'handle_reentry_logic',
     'monitor_active_trades',
+    'recover_active_trades_from_exchange',
     'periodic_trade_sync',
     'setup_module_dependencies'
 ]
+
 
 # Initialize module
 if __name__ == "__main__":

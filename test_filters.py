@@ -1,4 +1,4 @@
-python3 - <<'PY'
+
 import asyncio
 from enhanced_trend_filters import EnhancedTrendOrchestrator
 

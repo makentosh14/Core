@@ -1960,11 +1960,11 @@ __all__ = [
     'get_enhanced_trend_context'
 ]
 
-    async def close(self):
-        """Close shared HTTP resources."""
-        try:
-            # Close shared aiohttp session if present
-            if 'async def _close_http_session' in globals():
-                await _close_http_session()
-        except Exception:
-            pass
+async def close(self):
+    """Close shared HTTP resources."""
+    try:
+        # Close shared aiohttp session if present
+        if 'async def _close_http_session' in globals():
+            await _close_http_session()
+    except Exception:
+        pass

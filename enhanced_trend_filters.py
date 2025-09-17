@@ -18,6 +18,23 @@ from logger import log
 import aiohttp
 import json
 
+# ---- JSON/print-safe conversion helpers ----
+def _to_native(obj):
+    """Recursively convert numpy scalars to Python types; leave strings/structs intact."""
+    try:
+        import numpy as np  # local import so module doesn't hard-depend if unused
+        if isinstance(obj, dict):
+            return {k: _to_native(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            t = [_to_native(x) for x in obj]
+            return type(obj)(t) if not isinstance(obj, list) else t
+        if isinstance(obj, (np.floating, np.integer)):
+            return obj.item()
+    except Exception:
+        pass
+    return obj
+
+
 class MarketStructureAnalyzer:
     """Advanced market structure analysis for trend detection"""
     
@@ -73,8 +90,8 @@ class MarketStructureAnalyzer:
             
             result = {
                 "structure": overall_structure["trend"],
-                "strength": float(overall_structure["strength"]),
-                "confidence": float(overall_structure["confidence"]),
+                "strength": overall_structure["strength"],
+                "confidence": overall_structure["confidence"],
                 "key_levels": key_levels,
                 "breakout_probability": breakout_analysis,
                 "timeframe_analysis": structure_signals,
@@ -118,7 +135,7 @@ class MarketStructureAnalyzer:
             
             return {
                 "trend": hh_ll_pattern["trend"],
-                "strength": float(trend_strength),
+                "strength": trend_strength,
                 "swing_highs": swing_highs,
                 "swing_lows": swing_lows,
                 "volume_confirmation": volume_confirmation,
@@ -127,7 +144,7 @@ class MarketStructureAnalyzer:
             
         except Exception as e:
             log(f"❌ Error analyzing {timeframe} structure: {e}", level="ERROR")
-            return {"trend": "neutral", "strength": float(0.5), "timeframe": timeframe}
+            return {"trend": "neutral", "strength": 0.5, "timeframe": timeframe}
     
     def _find_swing_points(self, data: List[float], point_type: str) -> List[Tuple[int, float]]:
         """Find swing highs or lows in price data"""
@@ -162,19 +179,19 @@ class MarketStructureAnalyzer:
         ll = all(recent_lows[i] < recent_lows[i-1] for i in range(1, len(recent_lows)))
         
         if hh and hl:
-            return {"trend": "uptrend", "pattern": "hh_hl", "strength": float(0.8)}
+            return {"trend": "uptrend", "pattern": "hh_hl", "strength": 0.8}
         elif lh and ll:
-            return {"trend": "downtrend", "pattern": "lh_ll", "strength": float(0.8)}
+            return {"trend": "downtrend", "pattern": "lh_ll", "strength": 0.8}
         elif hh and not hl:
-            return {"trend": "weak_uptrend", "pattern": "hh_only", "strength": float(0.6)}
+            return {"trend": "weak_uptrend", "pattern": "hh_only", "strength": 0.6}
         elif hl and not hh:
-            return {"trend": "weak_uptrend", "pattern": "hl_only", "strength": float(0.6)}
+            return {"trend": "weak_uptrend", "pattern": "hl_only", "strength": 0.6}
         elif lh and not ll:
-            return {"trend": "weak_downtrend", "pattern": "lh_only", "strength": float(0.6)}
+            return {"trend": "weak_downtrend", "pattern": "lh_only", "strength": 0.6}
         elif ll and not lh:
-            return {"trend": "weak_downtrend", "pattern": "ll_only", "strength": float(0.6)}
+            return {"trend": "weak_downtrend", "pattern": "ll_only", "strength": 0.6}
         else:
-            return {"trend": "ranging", "pattern": "mixed", "strength": float(0.4)}
+            return {"trend": "ranging", "pattern": "mixed", "strength": 0.4}
     
     def _analyze_volume_at_swings(self, swing_highs: List, swing_lows: List, 
                                  volumes: List, closes: List) -> Dict[str, Any]:
@@ -350,7 +367,7 @@ class MarketStructureAnalyzer:
     def _combine_structure_signals(self, structure_signals: Dict) -> Dict[str, Any]:
         """Combine structure analysis from multiple timeframes"""
         if not structure_signals:
-            return {"trend": "neutral", "strength": float(0.5), "confidence": float(30)}
+            return {"trend": "neutral", "strength": 0.5, "confidence": 30}
         
         # Weight timeframes by importance
         tf_weights = {"1": 0.1, "5": 0.2, "15": 0.3, "60": 0.25, "240": 0.15}
@@ -392,8 +409,8 @@ class MarketStructureAnalyzer:
         
         return {
             "trend": overall_trend,
-            "strength": float(overall_strength),
-            "confidence": float(confidence),
+            "strength": overall_strength,
+            "confidence": confidence,
             "trend_scores": trend_scores
         }
     
@@ -418,8 +435,8 @@ class MarketStructureAnalyzer:
         """Return default structure analysis"""
         return {
             "structure": "neutral",
-            "strength": float(0.5),
-            "confidence": float(30),
+            "strength": 0.5,
+            "confidence": 30,
             "key_levels": {"resistance": [], "support": [], "key_level_strength": 0},
             "breakout_probability": {"probability": float(0.5), "direction": "neutral"},
             "timeframe_analysis": {},
@@ -494,7 +511,7 @@ class EnhancedAltseasonDetector:
             })
             
             if btc_response.get("retCode") != 0:
-                return {"outperforming_ratio": 0.5, "avg_outperformance": 0, "strength": float(0.5)}
+                return {"outperforming_ratio": 0.5, "avg_outperformance": 0, "strength": 0.5}
             
             btc_change = float(btc_response["result"]["list"][0]["price24hPcnt"])
             
@@ -533,7 +550,7 @@ class EnhancedAltseasonDetector:
                 await asyncio.sleep(0.1)
             
             if total_alts == 0:
-                return {"outperforming_ratio": 0.5, "avg_outperformance": 0, "strength": float(0.5)}
+                return {"outperforming_ratio": 0.5, "avg_outperformance": 0, "strength": 0.5}
             
             outperforming_ratio = outperforming_alts / total_alts
             avg_outperformance = np.mean(performance_deltas)
@@ -544,14 +561,14 @@ class EnhancedAltseasonDetector:
             return {
                 "outperforming_ratio": outperforming_ratio,
                 "avg_outperformance": avg_outperformance,
-                "strength": float(strength),
+                "strength": strength,
                 "total_analyzed": total_alts,
                 "btc_change": btc_change
             }
             
         except Exception as e:
             log(f"❌ Error analyzing alt performance: {e}", level="ERROR")
-            return {"outperforming_ratio": 0.5, "avg_outperformance": 0, "strength": float(0.5)}
+            return {"outperforming_ratio": 0.5, "avg_outperformance": 0, "strength": 0.5}
     
     async def _analyze_market_cap_flows(self) -> Dict[str, Any]:
         """Analyze market cap flows between BTC and alts"""
@@ -585,7 +602,7 @@ class EnhancedAltseasonDetector:
                 await asyncio.sleep(0.05)
             
             if not alt_volumes or btc_vol_response.get("retCode") != 0:
-                return {"flow_direction": "neutral", "strength": float(0.5)}
+                return {"flow_direction": "neutral", "strength": 0.5}
             
             btc_volume = float(btc_vol_response["result"]["list"][0]["volume24h"])
             total_alt_volume = sum(alt_volumes)
@@ -605,7 +622,7 @@ class EnhancedAltseasonDetector:
             
             return {
                 "flow_direction": flow_direction,
-                "strength": float(strength),
+                "strength": strength,
                 "flow_ratio": flow_ratio,
                 "btc_volume": btc_volume,
                 "alt_volume": total_alt_volume
@@ -613,7 +630,7 @@ class EnhancedAltseasonDetector:
             
         except Exception as e:
             log(f"❌ Error analyzing market cap flows: {e}", level="ERROR")
-            return {"flow_direction": "neutral", "strength": float(0.5)}
+            return {"flow_direction": "neutral", "strength": 0.5}
     
     async def _analyze_sector_rotation(self) -> Dict[str, Any]:
         """Analyze sector rotation patterns"""
@@ -687,7 +704,7 @@ class EnhancedAltseasonDetector:
             })
             
             if btc_response.get("retCode") != 0:
-                return {"sentiment": "neutral", "strength": float(0.5)}
+                return {"sentiment": "neutral", "strength": 0.5}
             
             candles = btc_response["result"]["list"]
             price_changes = []
@@ -722,14 +739,14 @@ class EnhancedAltseasonDetector:
             
             return {
                 "sentiment": sentiment,
-                "strength": float(strength),
+                "strength": strength,
                 "volatility": volatility,
                 "trend": trend
             }
             
         except Exception as e:
             log(f"❌ Error analyzing social sentiment: {e}", level="ERROR")
-            return {"sentiment": "neutral", "strength": float(0.5)}
+            return {"sentiment": "neutral", "strength": 0.5}
     
     async def _analyze_institutional_flows(self) -> Dict[str, Any]:
         """Analyze institutional flow patterns"""
@@ -785,13 +802,13 @@ class EnhancedAltseasonDetector:
             
             return {
                 "flow_type": flow_type,
-                "strength": float(strength),
+                "strength": strength,
                 "institutional_activity": avg_institutional_activity if institutional_signals else 0
             }
             
         except Exception as e:
             log(f"❌ Error analyzing institutional flows: {e}", level="ERROR")
-            return {"flow_type": "unknown", "strength": float(0.5)}
+            return {"flow_type": "unknown", "strength": 0.5}
     
     def _calculate_altseason_score(self, analyses: Dict) -> Dict[str, Any]:
         """Calculate overall altseason score from all analyses"""
@@ -837,8 +854,8 @@ class EnhancedAltseasonDetector:
             return {
                 "is_altseason": is_altseason,
                 "season": season,
-                "strength": float(final_score),
-                "confidence": float(min(final_score * 100 + 20), 95),
+                "strength": final_score,
+                "confidence": min(final_score * 100 + 20, 95),
                 "details": details,
                 "components": {
                     "alt_outperformance": analyses["alt_performance"].get("outperforming_ratio", 0.5),
@@ -858,8 +875,8 @@ class EnhancedAltseasonDetector:
         return {
             "is_altseason": False,
             "season": "neutral",
-            "strength": float(0.5),
-            "confidence": float(50),
+            "strength": 0.5,
+            "confidence": 50,
             "details": {},
             "components": {}
         }
@@ -929,7 +946,7 @@ class MultiSourceSentimentAnalyzer:
             return {
                 "value": fg_value,
                 "sentiment": sentiment,
-                "strength": float(min(abs(fg_value - 50) / 50), 1.0)
+                "strength": min(abs(fg_value - 50 / 50), 1.0)
             }
             
         except ImportError:
@@ -951,7 +968,7 @@ class MultiSourceSentimentAnalyzer:
             })
             
             if response.get("retCode") != 0:
-                return {"value": 50, "sentiment": "neutral", "strength": float(0.5)}
+                return {"value": 50, "sentiment": "neutral", "strength": 0.5}
             
             candles = response["result"]["list"]
             price_changes = []
@@ -981,12 +998,12 @@ class MultiSourceSentimentAnalyzer:
             return {
                 "value": fg_value,
                 "sentiment": sentiment,
-                "strength": float(min(abs(fg_value - 50) / 50), 1.0)
+                "strength": min(abs(fg_value - 50 / 50), 1.0)
             }
             
         except Exception as e:
             log(f"❌ Built-in fear & greed fallback failed: {e}", level="ERROR")
-            return {"value": 50, "sentiment": "neutral", "strength": float(0.5)}
+            return {"value": 50, "sentiment": "neutral", "strength": 0.5}
     
     async def _analyze_social_volume(self) -> Dict[str, Any]:
         """Analyze social media volume patterns"""
@@ -1000,7 +1017,7 @@ class MultiSourceSentimentAnalyzer:
             })
             
             if response.get("retCode") != 0:
-                return {"volume_trend": "neutral", "strength": float(0.5)}
+                return {"volume_trend": "neutral", "strength": 0.5}
             
             current_volume = float(response["result"]["list"][0]["volume24h"])
             
@@ -1013,7 +1030,7 @@ class MultiSourceSentimentAnalyzer:
             })
             
             if hist_response.get("retCode") != 0:
-                return {"volume_trend": "neutral", "strength": float(0.5)}
+                return {"volume_trend": "neutral", "strength": 0.5}
             
             hist_volumes = [float(candle[5]) for candle in hist_response["result"]["list"]]
             avg_volume = np.mean(hist_volumes)
@@ -1032,13 +1049,13 @@ class MultiSourceSentimentAnalyzer:
             
             return {
                 "volume_trend": volume_trend,
-                "strength": float(strength),
+                "strength": strength,
                 "volume_ratio": volume_ratio
             }
             
         except Exception as e:
             log(f"❌ Error analyzing social volume: {e}", level="ERROR")
-            return {"volume_trend": "neutral", "strength": float(0.5)}
+            return {"volume_trend": "neutral", "strength": 0.5}
     
     async def _analyze_news_sentiment(self) -> Dict[str, Any]:
         """Analyze news sentiment (simulated)"""
@@ -1054,7 +1071,7 @@ class MultiSourceSentimentAnalyzer:
             })
             
             if response.get("retCode") != 0:
-                return {"sentiment": "neutral", "strength": float(0.5)}
+                return {"sentiment": "neutral", "strength": 0.5}
             
             candles = response["result"]["list"]
             price_trend = (float(candles[0][4]) - float(candles[-1][4])) / float(candles[-1][4])
@@ -1077,13 +1094,13 @@ class MultiSourceSentimentAnalyzer:
             
             return {
                 "sentiment": sentiment,
-                "strength": float(strength),
+                "strength": strength,
                 "price_trend": price_trend
             }
             
         except Exception as e:
             log(f"❌ Error analyzing news sentiment: {e}", level="ERROR")
-            return {"sentiment": "neutral", "strength": float(0.5)}
+            return {"sentiment": "neutral", "strength": 0.5}
     
     async def _analyze_options_sentiment(self) -> Dict[str, Any]:
         """Analyze options sentiment (simulated)"""
@@ -1099,7 +1116,7 @@ class MultiSourceSentimentAnalyzer:
             })
             
             if response.get("retCode") != 0:
-                return {"options_sentiment": "neutral", "strength": float(0.5)}
+                return {"options_sentiment": "neutral", "strength": 0.5}
             
             candles = response["result"]["list"]
             
@@ -1129,13 +1146,13 @@ class MultiSourceSentimentAnalyzer:
             
             return {
                 "options_sentiment": options_sentiment,
-                "strength": float(strength),
+                "strength": strength,
                 "volatility_trend": volatility_trend
             }
             
         except Exception as e:
             log(f"❌ Error analyzing options sentiment: {e}", level="ERROR")
-            return {"options_sentiment": "neutral", "strength": float(0.5)}
+            return {"options_sentiment": "neutral", "strength": 0.5}
     
     def _aggregate_sentiment_scores(self, sentiment_scores: Dict) -> Dict[str, Any]:
         """Aggregate sentiment scores from all sources"""
@@ -1170,7 +1187,7 @@ class MultiSourceSentimentAnalyzer:
             return {
                 "overall_sentiment": overall_sentiment,
                 "sentiment_score": final_score,
-                "confidence": float(min(final_score * 100 + 20), 95),
+                "confidence": min(final_score * 100 + 20, 95),
                 "components": component_details,
                 "market_mood": self._determine_market_mood(final_score, component_details)
             }
@@ -1201,7 +1218,7 @@ class MultiSourceSentimentAnalyzer:
         return {
             "overall_sentiment": "neutral",
             "sentiment_score": 0.5,
-            "confidence": float(50),
+            "confidence": 50,
             "components": {},
             "market_mood": "cautious"
         }
@@ -1294,7 +1311,7 @@ class VolumeProfileEngine:
             sorted_levels = sorted(volume_profile.items(), key=lambda x: x[1], reverse=True)
             
             if not sorted_levels:
-                return {"activity_level": "low", "pattern": "none", "strength": float(0.5)}
+                return {"activity_level": "low", "pattern": "none", "strength": 0.5}
             
             # Analyze top volume areas
             top_10_percent = int(len(sorted_levels) * 0.1) or 1
@@ -1333,20 +1350,20 @@ class VolumeProfileEngine:
             return {
                 "activity_level": activity_level,
                 "pattern": pattern,
-                "strength": float(high_volume_concentration),
+                "strength": high_volume_concentration,
                 "volume_imbalance": volume_imbalance,
                 "concentration_ratio": high_volume_concentration
             }
             
         except Exception as e:
             log(f"❌ Error analyzing institutional patterns: {e}", level="ERROR")
-            return {"activity_level": "low", "pattern": "none", "strength": float(0.5)}
+            return {"activity_level": "low", "pattern": "none", "strength": 0.5}
     
     def _detect_accumulation_distribution(self, volume_profile: Dict, candles: List) -> Dict[str, Any]:
         """Detect accumulation/distribution phases"""
         try:
             if len(candles) < 20:
-                return {"phase": "unknown", "strength": float(0.5)}
+                return {"phase": "unknown", "strength": 0.5}
             
             # Get price trend
             prices = [float(c[4]) for c in candles[-20:]]
@@ -1394,7 +1411,7 @@ class VolumeProfileEngine:
             
             return {
                 "phase": phase,
-                "strength": float(strength),
+                "strength": strength,
                 "price_trend": price_trend,
                 "volume_trend": volume_trend,
                 "volume_balance": volume_balance
@@ -1402,7 +1419,7 @@ class VolumeProfileEngine:
             
         except Exception as e:
             log(f"❌ Error detecting accumulation/distribution: {e}", level="ERROR")
-            return {"phase": "unknown", "strength": float(0.5)}
+            return {"phase": "unknown", "strength": 0.5}
     
     def _find_high_volume_nodes(self, volume_profile: Dict) -> List[Dict[str, Any]]:
         """Find high-volume nodes that act as support/resistance"""
@@ -1425,7 +1442,7 @@ class VolumeProfileEngine:
                         "price": price,
                         "volume": volume,
                         "volume_percentage": volume_percentage,
-                        "strength": float(min(volume_percentage * 20), 1.0)  # Normalize to 0-1
+                        "strength": min(volume_percentage * 20, 1.0)  # Normalize to 0-1
                     })
             
             return nodes
@@ -1438,7 +1455,7 @@ class VolumeProfileEngine:
         """Analyze support/resistance strength based on volume"""
         try:
             if not volume_nodes or not candles:
-                return {"support_levels": [], "resistance_levels": [], "strength": float("weak")}
+                return {"support_levels": [], "resistance_levels": [], "strength": "weak"}
             
             current_price = float(candles[0][4])
             
@@ -1452,13 +1469,13 @@ class VolumeProfileEngine:
                 if price < current_price:
                     support_levels.append({
                         "price": price,
-                        "strength": float(strength),
+                        "strength": strength,
                         "distance_pct": abs(price - current_price) / current_price * 100
                     })
                 else:
                     resistance_levels.append({
                         "price": price,
-                        "strength": float(strength),
+                        "strength": strength,
                         "distance_pct": abs(price - current_price) / current_price * 100
                     })
             
@@ -1481,13 +1498,13 @@ class VolumeProfileEngine:
             return {
                 "support_levels": support_levels[:3],  # Top 3 nearest support
                 "resistance_levels": resistance_levels[:3],  # Top 3 nearest resistance
-                "strength": float(overall_strength),
+                "strength": overall_strength,
                 "avg_strength": avg_strength
             }
             
         except Exception as e:
             log(f"❌ Error analyzing support/resistance strength: {e}", level="ERROR")
-            return {"support_levels": [], "resistance_levels": [], "strength": float("weak")}
+            return {"support_levels": [], "resistance_levels": [], "strength": "weak"}
     
     def _calculate_value_area(self, volume_profile: Dict) -> Dict[str, Any]:
         """Calculate value area (70% of volume)"""
@@ -1544,10 +1561,10 @@ class VolumeProfileEngine:
         """Return default volume profile analysis"""
         return {
             "volume_profile": {},
-            "institutional_activity": {"activity_level": "low", "pattern": "none", "strength": float(0.5)},
-            "accumulation_distribution": {"phase": "unknown", "strength": float(0.5)},
+            "institutional_activity": {"activity_level": "low", "pattern": "none", "strength": 0.5},
+            "accumulation_distribution": {"phase": "unknown", "strength": 0.5},
             "volume_nodes": [],
-            "support_resistance": {"support_levels": [], "resistance_levels": [], "strength": float("weak")},
+            "support_resistance": {"support_levels": [], "resistance_levels": [], "strength": "weak"},
             "poc_level": None,
             "value_area": {"high": None, "low": None, "poc": None}
         }
@@ -1675,8 +1692,8 @@ class EnhancedTrendOrchestrator:
             return {
                 # Core trend data
                 "trend": base_trend,
-                "strength": float(enhanced_strength),
-                "confidence": float(enhanced_confidence),
+                "strength": enhanced_strength,
+                "confidence": enhanced_confidence,
                 "regime": market_regime,
                 
                 # Enhanced components
@@ -1906,11 +1923,11 @@ class EnhancedTrendOrchestrator:
         """Return fallback context if all analyses fail"""
         return {
             "trend": "neutral",
-            "strength": float(0.5),
-            "confidence": float(30),
+            "strength": 0.5,
+            "confidence": 30,
             "regime": "unknown",
             "market_structure": {},
-            "altseason": {"is_altseason": False, "strength": float(0.5)},
+            "altseason": {"is_altseason": False, "strength": 0.5},
             "sentiment": {"overall_sentiment": "neutral", "sentiment_score": 0.5},
             "volume_profile": {},
             "recommendations": {"primary_strategy": "wait_and_see", "risk_allocation": "conservative"},

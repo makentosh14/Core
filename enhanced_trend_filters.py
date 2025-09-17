@@ -18,6 +18,20 @@ from logger import log
 import aiohttp
 import json
 
+_AIOHTTP_SESSION: aiohttp.ClientSession | None = None
+
+async def _get_http_session() -> aiohttp.ClientSession:
+    global _AIOHTTP_SESSION
+    if _AIOHTTP_SESSION is None or _AIOHTTP_SESSION.closed:
+        _AIOHTTP_SESSION = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
+    return _AIOHTTP_SESSION
+
+async def _close_http_session():
+    global _AIOHTTP_SESSION
+    if _AIOHTTP_SESSION and not _AIOHTTP_SESSION.closed:
+        await _AIOHTTP_SESSION.close()
+    _AIOHTTP_SESSION = None
+
 # ---- JSON/print-safe conversion helpers ----
 def _to_native(obj):
     """Recursively convert numpy scalars to Python types; leave strings/structs intact."""

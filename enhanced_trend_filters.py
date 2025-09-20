@@ -1039,6 +1039,8 @@ class EnhancedAltseasonDetector:
             "top_performers": []
         }
 
+
+
 class MultiSourceSentimentAnalyzer:
     """FIXED: Multi-source sentiment analysis with proper calculations"""
     
@@ -1049,6 +1051,13 @@ class MultiSourceSentimentAnalyzer:
             "news_sentiment": 0.25,
             "options_flow": 0.25
         }
+        from api_config import ExternalAPIManager
+        self.api_manager = ExternalAPIManager()
+
+    async def close(self):
+        """Close API manager sessions"""
+        if hasattr(self, 'api_manager') and self.api_manager:
+            await self.api_manager.close_session()
     
     async def get_aggregated_sentiment(self) -> Dict[str, Any]:
         """FIXED: Get aggregated sentiment from multiple sources"""
@@ -1370,6 +1379,65 @@ class EnhancedTrendOrchestrator:
         self.cache = {}
         self.cache_ttl = 300  # 5 minutes
         self.last_update = {}
+        self._sessions_to_close = []
+
+    async def close(self):
+        """Close all sessions and cleanup resources"""
+        try:
+            from logger import log
+            log("🧹 Closing EnhancedTrendOrchestrator sessions...")
+            
+            # Close any sessions created by the analyzers
+            # Since your analyzers don't store persistent sessions, 
+            # most likely the unclosed session is from a temporary one
+            
+            # Check if any analyzer has a session attribute
+            analyzers = [
+                self.market_structure,
+                self.altseason_detector, 
+                self.sentiment_analyzer,
+                self.volume_engine
+            ]
+            
+            for analyzer in analyzers:
+                # Close any session attributes
+                if hasattr(analyzer, 'session') and analyzer.session:
+                    if not analyzer.session.closed:
+                        await analyzer.session.close()
+                        
+                # Close any api_manager if it exists
+                if hasattr(analyzer, 'api_manager') and analyzer.api_manager:
+                    if hasattr(analyzer.api_manager, 'close_session'):
+                        await analyzer.api_manager.close_session()
+                        
+                # Close any close method if it exists
+                if hasattr(analyzer, 'close'):
+                    await analyzer.close()
+            
+            # Close any tracked sessions
+            for session in self._sessions_to_close:
+                if session and not session.closed:
+                    await session.close()
+            
+            # Clear cache
+            self.cache.clear()
+            self.last_update.clear()
+            self._sessions_to_close.clear()
+            
+            log("✅ EnhancedTrendOrchestrator closed successfully")
+            
+        except Exception as e:
+            from logger import log
+            log(f"⚠️ Error closing EnhancedTrendOrchestrator: {e}", level="WARNING")
+
+    # Context manager support
+    async def __aenter__(self):
+        """Async context manager entry"""
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit"""
+        await self.close()
     
     async def get_enhanced_trend_context(self) -> Dict[str, Any]:
         """FIXED: Get comprehensive trend context using all enhanced analyzers"""

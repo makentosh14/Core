@@ -242,7 +242,11 @@ async def filter_core_symbols(symbols):
 async def calculate_core_score(symbol, core_candles, trend_context):
     """Calculate core strategy score - stricter than base scoring"""
     try:
-        base_score = score_symbol(core_candles)
+        base_score, tf_scores, trade_type, indicator_scores, used_indicators = score_symbol(
+            symbol, 
+            core_candles, 
+            trend_context
+        )
         
         # Multi-timeframe alignment bonus
         tf_scores = {}
@@ -839,6 +843,7 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+
 
 
 

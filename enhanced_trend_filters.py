@@ -1385,52 +1385,51 @@ class EnhancedTrendOrchestrator:
         """Close all sessions and cleanup resources"""
         try:
             from logger import log
-            log("🧹 Closing EnhancedTrendOrchestrator sessions...")
+            log("🧹 Closing EnhancedTrendOrchestrator...")
             
-            # Close any sessions created by the analyzers
-            # Since your analyzers don't store persistent sessions, 
-            # most likely the unclosed session is from a temporary one
-            
-            # Check if any analyzer has a session attribute
+            # List of analyzers to clean up
             analyzers = [
-                self.market_structure,
-                self.altseason_detector, 
-                self.sentiment_analyzer,
-                self.volume_engine
+                ('market_structure', self.market_structure),
+                ('altseason_detector', self.altseason_detector), 
+                ('sentiment_analyzer', self.sentiment_analyzer),
+                ('volume_engine', self.volume_engine)
             ]
             
-            for analyzer in analyzers:
-                # Close any session attributes
-                if hasattr(analyzer, 'session') and analyzer.session:
-                    if not analyzer.session.closed:
-                        await analyzer.session.close()
+            # Close each analyzer safely
+            for name, analyzer in analyzers:
+                if analyzer:
+                    try:
+                        # Close any session attribute
+                        if hasattr(analyzer, 'session') and analyzer.session:
+                            if not analyzer.session.closed:
+                                await analyzer.session.close()
+                                log(f"✅ Closed session in {name}")
                         
-                # Close any api_manager if it exists
-                if hasattr(analyzer, 'api_manager') and analyzer.api_manager:
-                    if hasattr(analyzer.api_manager, 'close_session'):
-                        await analyzer.api_manager.close_session()
+                        # Close any api_manager
+                        if hasattr(analyzer, 'api_manager') and analyzer.api_manager:
+                            if hasattr(analyzer.api_manager, 'close_session'):
+                                await analyzer.api_manager.close_session()
+                                log(f"✅ Closed API manager in {name}")
                         
-                # Close any close method if it exists
-                if hasattr(analyzer, 'close'):
-                    await analyzer.close()
+                        # Call analyzer's close method if it exists
+                        if hasattr(analyzer, 'close') and callable(getattr(analyzer, 'close')):
+                            await analyzer.close()
+                            log(f"✅ Called close() on {name}")
+                            
+                    except Exception as e:
+                        log(f"⚠️ Error closing {name}: {e}", level="WARNING")
             
-            # Close any tracked sessions
-            for session in self._sessions_to_close:
-                if session and not session.closed:
-                    await session.close()
-            
-            # Clear cache
+            # Clear caches
             self.cache.clear()
             self.last_update.clear()
-            self._sessions_to_close.clear()
             
             log("✅ EnhancedTrendOrchestrator closed successfully")
             
         except Exception as e:
             from logger import log
-            log(f"⚠️ Error closing EnhancedTrendOrchestrator: {e}", level="WARNING")
+            log(f"❌ Error in EnhancedTrendOrchestrator.close(): {e}", level="ERROR")
 
-    # Context manager support
+    # Also add context manager support
     async def __aenter__(self):
         """Async context manager entry"""
         return self

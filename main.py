@@ -80,7 +80,7 @@ async def core_strategy_scan(symbols, trend_context):
         # Focus on high-quality symbols only
         quality_symbols = await filter_core_symbols(symbols)
         
-        for symbol in quality_symbols[:20]:  # Limit to top 20 symbols for focus
+        for symbol in symbols:  # Limit to top 20 symbols for focus
             try:
                 # Skip if already have position
                 if symbol in active_trades and not active_trades[symbol].get("exited", False):
@@ -119,7 +119,7 @@ async def core_strategy_scan(symbols, trend_context):
 
                 # 3. Calculate confidence with higher threshold
                 confidence = calculate_confidence(core_candles, trend_context)
-                if confidence < 70:  # Minimum 70% confidence for core strategy
+                if confidence < 60:  # Minimum 70% confidence for core strategy
                     continue
 
                 # 4. Validate core strategy conditions
@@ -165,46 +165,79 @@ async def core_strategy_scan(symbols, trend_context):
         log(traceback.format_exc(), level="ERROR")
 
 async def filter_core_symbols(symbols):
-    """Filter symbols for core strategy - only highest quality"""
+    """Filter symbols for core strategy - FIXED and more aggressive"""
     try:
         core_symbols = []
         
+        log(f"🔍 Filtering {len(symbols)} symbols for core strategy...")
+        
         for symbol in symbols:
             try:
-                if symbol in live_candles and '1' in live_candles[symbol]:
-                    candles = live_candles[symbol]['1'][-20:]
-                    if len(candles) >= 20:
-                        # Calculate liquidity score
-                        volumes = [float(c.get('volume', 0)) for c in candles]
-                        avg_volume = sum(volumes) / len(volumes)
-                        
-                        # Calculate volatility score
-                        price_changes = []
-                        for i in range(1, len(candles)):
-                            prev = float(candles[i-1].get('close', 0))
-                            curr = float(candles[i].get('close', 0))
-                            if prev > 0:
-                                change = abs((curr - prev) / prev)
-                                price_changes.append(change)
-                        
-                        if price_changes:
-                            avg_volatility = sum(price_changes) / len(price_changes)
-                            
-                            # Core strategy filters - very strict
-                            if (avg_volume > 2000000 and           # High liquidity
-                                0.008 < avg_volatility < 0.08 and  # Good volatility range
-                                'USDT' in symbol):                 # USDT pairs only
-                                core_symbols.append(symbol)
+                # Check if we have any candle data for this symbol
+                if symbol not in live_candles:
+                    continue
+                
+                # Try to get candles from any available timeframe
+                candles = None
+                for tf in ['1', '5', '15']:  # Try multiple timeframes
+                    if tf in live_candles[symbol] and live_candles[symbol][tf]:
+                        candles = live_candles[symbol][tf][-20:]
+                        break
+                
+                if not candles or len(candles) < 20:  # Reduced from 20 to 10
+                    continue
+                
+                # Calculate liquidity score
+                volumes = [float(c.get('volume', 0)) for c in candles]
+                if not volumes:
+                    continue
+                    
+                avg_volume = sum(volumes) / len(volumes)
+                latest_volume = volumes[-1]
+                
+                # Calculate volatility score
+                price_changes = []
+                for i in range(1, len(candles)):
+                    prev = float(candles[i-1].get('close', 0))
+                    curr = float(candles[i].get('close', 0))
+                    if prev > 0:
+                        change = abs((curr - prev) / prev)
+                        price_changes.append(change)
+                
+                if not price_changes:
+                    continue
+                    
+                avg_volatility = sum(price_changes) / len(price_changes)
+                
+                # MUCH MORE AGGRESSIVE FILTERS
+                is_quality_symbol = (
+                    avg_volume > 1000000 and              # Lowered from 2,000,000 to 500,000
+                    0.005 < avg_volatility < 0.15 and    # Wider volatility range (was 0.008-0.08)
+                    'USDT' in symbol and                 # Still USDT pairs only
+                    latest_volume > avg_volume * 0.3     # Recent volume activity
+                )
+                
+                if is_quality_symbol:
+                    # Add volume score for sorting
+                    volume_score = avg_volume * (1 + avg_volatility)
+                    core_symbols.append((symbol, volume_score))
                 
             except Exception as e:
                 continue
         
-        # Sort by volume and return top symbols
-        return core_symbols[:30]
+        # Sort by volume score (highest first) and return symbols
+        core_symbols.sort(key=lambda x: x[1], reverse=True)
+        filtered_symbols = [symbol for symbol, score in core_symbols]
+        
+        log(f"✅ Filtered to {len(filtered_symbols)} quality symbols from {len(symbols)} total")
+        
+        # Return more symbols - up to 100 instead of 30
+        return filtered_symbols[:500]  # Increased limit
         
     except Exception as e:
         log(f"❌ CORE STRATEGY: Error filtering symbols: {e}", level="ERROR")
-        return symbols[:20]
+        return symbols[:200]  # Return more symbols on error
+
 
 async def calculate_core_score(symbol, core_candles, trend_context):
     """Calculate core strategy score - stricter than base scoring"""

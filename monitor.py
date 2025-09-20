@@ -107,6 +107,7 @@ async def update_stop_loss_order(symbol: str, trade: Dict, new_sl: float) -> boo
         orders_response = await signed_request("GET", "/v5/order/realtime", {
             "category": "linear",
             "symbol": symbol,
+            "settleCoin": "USDT",
             "orderFilter": "StopOrder"
         })
         
@@ -126,6 +127,7 @@ async def update_stop_loss_order(symbol: str, trade: Dict, new_sl: float) -> boo
         cancel_response = await signed_request("POST", "/v5/order/cancel", {
             "category": "linear",
             "symbol": symbol,
+            "settleCoin": "USDT",
             "orderId": sl_order.get("orderId")
         })
         
@@ -147,6 +149,7 @@ async def update_stop_loss_order(symbol: str, trade: Dict, new_sl: float) -> boo
             "qty": str(abs(float(qty))),
             "stopPrice": str(new_sl),
             "timeInForce": "GTC",
+            "settleCoin": "USDT",
             "reduceOnly": True
         })
         
@@ -197,6 +200,7 @@ async def check_and_restore_sl(symbol: str, trade: Dict[str, Any]) -> bool:
         orders_response = await signed_request("GET", "/v5/order/realtime", {
             "category": "linear", 
             "symbol": symbol,
+            "settleCoin": "USDT",
             "orderFilter": "StopOrder"
         })
         
@@ -234,6 +238,7 @@ async def check_and_restore_sl(symbol: str, trade: Dict[str, Any]) -> bool:
             "stopPrice": str(sl_price),
             "triggerDirection": 1 if direction == "Long" else 2,
             "timeInForce": "GTC",
+            "settleCoin": "USDT",
             "reduceOnly": True
         })
         
@@ -255,7 +260,8 @@ async def recover_active_trades_from_exchange() -> None:
         
         # Get current positions
         positions_response = await signed_request("GET", "/v5/position/list", {
-            "category": "linear"
+            "category": "linear",
+            "settleCoin": "USDT"
         })
         
         if positions_response.get("retCode") != 0:
@@ -318,6 +324,7 @@ async def check_and_restore_sl(symbol: str, trade: Dict) -> bool:
         orders_response = await signed_request("GET", "/v5/order/realtime", {
             "category": "linear", 
             "symbol": symbol,
+            "settleCoin": "USDT",
             "orderFilter": "StopOrder"
         })
         
@@ -352,6 +359,7 @@ async def check_and_restore_sl(symbol: str, trade: Dict) -> bool:
             "qty": str(abs(float(qty))),
             "stopPrice": str(expected_sl),
             "timeInForce": "GTC",
+            "settleCoin": "USDT",
             "reduceOnly": True
         })
         
@@ -499,6 +507,7 @@ async def check_and_restore_sl(symbol: str, trade: Dict[str, Any]) -> bool:
         # Get current orders
         orders_response = await signed_request("GET", "/v5/order/realtime", {
             "category": "linear", 
+            "settleCoin": "USDT",
             "symbol": symbol,
             "orderFilter": "StopOrder"
         })
@@ -530,6 +539,7 @@ async def check_and_restore_sl(symbol: str, trade: Dict[str, Any]) -> bool:
         
         sl_response = await signed_request("POST", "/v5/order/create", {
             "category": "linear",
+            "settleCoin": "USDT",
             "symbol": symbol,
             "side": order_side,
             "orderType": "Stop",
@@ -558,7 +568,8 @@ async def recover_active_trades_from_exchange() -> None:
         
         # Get current positions
         positions_response = await signed_request("GET", "/v5/position/list", {
-            "category": "linear"
+            "category": "linear",
+            "settleCoin": "USDT"
         })
         
         if positions_response.get("retCode") != 0:

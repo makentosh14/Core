@@ -267,7 +267,12 @@ async def calculate_core_score(symbol, core_candles, trend_context):
         trend_bonus = trend_strength * 1.0  # Up to 1.0 bonus
         
         # Momentum bonus
-        momentum = detect_momentum_strength(core_candles)
+        momentum = None
+        for tf, candles in core_candles.items():
+            if candles and len(candles) >= 10:
+                momentum = detect_momentum_strength(candles)
+        if momentum[0]:  # If momentum detected
+            break
         momentum_bonus = momentum * 1.5 if momentum > 0.7 else 0
         
         final_score = base_score + alignment_bonus + trend_bonus + momentum_bonus
@@ -843,6 +848,7 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+
 
 
 

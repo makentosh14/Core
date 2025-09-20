@@ -96,14 +96,16 @@ async def main():
     try:
         # Example 1: Get Wallet Balance (v5 API)
         response = await signed_request("GET", "/v5/account/wallet-balance", {
-            "accountType": "UNIFIED"
+            "accountType": "UNIFIED",
+             "settleCoin": "USDT"
         })
         print(response)
 
         # Example 2: Using context manager
         async with BybitAPIClient() as client:
             response = await client.request("GET", "/v5/account/wallet-balance", {
-                "accountType": "UNIFIED"
+                "accountType": "UNIFIED",
+                 "settleCoin": "USDT"
             })
             print("Via client:", response)
             

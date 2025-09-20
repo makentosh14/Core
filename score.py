@@ -70,6 +70,21 @@ MIN_TF_REQUIRED = {
     "Swing": 2,
 }
 
+def safe_detect_momentum_strength(candles):
+    """Safe wrapper for detect_momentum_strength"""
+    try:
+        if not candles or len(candles) < 10:
+            return False, None, 0
+        
+        # Ensure it's a proper list of candles
+        if isinstance(candles, (list, tuple)):
+            return detect_momentum_strength(candles)
+        else:
+            return False, None, 0
+            
+    except Exception as e:
+        return False, None, 0
+
 def enhanced_score_symbol(symbol, candles_by_timeframe, market_context=None):
     """Enhanced scoring with all the new validations"""
     
@@ -399,9 +414,9 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
     
     # Analyze momentum across timeframes
     momentum_data = {
-        "1m": detect_momentum_strength(candles_by_timeframe.get("1", [])),
-        "5m": detect_momentum_strength(candles_by_timeframe.get("5", [])),
-        "15m": detect_momentum_strength(candles_by_timeframe.get("15", []))
+        "1m": safe_detect_momentum_strength(candles_by_timeframe.get("1", [])),
+        "5m": safe_detect_momentum_strength(candles_by_timeframe.get("5", [])),
+        "15m": safe_detect_momentum_strength(candles_by_timeframe.get("15", []))
     }
     
     has_momentum = any(data[0] for tf, data in momentum_data.items() if data[0])
@@ -848,7 +863,7 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
     # Multi-timeframe bonuses
 
     if best_type == "Swing":
-        has_momentum, direction, strength = detect_momentum_strength(candles_by_timeframe.get("60", []))
+        has_momentum, direction, strength = safe_detect_momentum_strength(candles_by_timeframe.get("60", []))
         if not has_momentum or strength < 0.3:  # Lowered from 0.6
             log(f"⚠️ {symbol} Swing trade allowed with moderate momentum (strength={strength:.2f})")
             # Don't return 0 - just apply a penalty
@@ -1002,8 +1017,8 @@ def calculate_confidence(score, tf_scores, trend_context, trade_type):
 
 def has_pump_potential(candles_by_tf, direction):
     """Enhanced function with pattern analysis"""
-    momentum_1m = detect_momentum_strength(candles_by_tf.get("1", []))
-    momentum_5m = detect_momentum_strength(candles_by_tf.get("5", []))
+    momentum_1m = safe_detect_momentum_strength(candles_by_tf.get("1", []))
+    momentum_5m = safe_detect_momentum_strength(candles_by_tf.get("5", []))
     
     whale_activity = detect_whale_activity(candles_by_tf.get("5", []))
     

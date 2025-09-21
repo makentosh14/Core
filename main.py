@@ -242,80 +242,52 @@ async def core_strategy_scan(symbols, trend_context):
         log(traceback.format_exc(), level="ERROR")
 
 async def filter_core_symbols(symbols):
-    """Filter symbols for core strategy - FIXED and more aggressive"""
-
-    try:
-        log(f"🔍 Filtering {len(symbols)} symbols for core strategy...")
-        
-        # ADD THIS LINE HERE:
-        global live_candles
-        live_candles = fix_live_candles_structure(live_candles)
-        log(f"✅ Fixed live_candles structure before filtering")
-        
-        core_symbols = []
-        
-        for symbol in symbols:
-            try:
-                # Check if we have any candle data for this symbol
-                if symbol not in live_candles:
-                    continue
-                
-                # Try to get candles from any available timeframe
-                candles = safe_get_candles(live_candles, symbol)
-                
-                if not candles or len(candles) < 20:  # Reduced from 20 to 10
-                    continue
-                
-                # Calculate liquidity score
-                volumes = [float(c.get('volume', 0)) for c in candles]
-                if not volumes:
-                    continue
-                    
-                avg_volume = sum(volumes) / len(volumes)
-                latest_volume = volumes[-1]
-                
-                # Calculate volatility score
-                price_changes = []
-                for i in range(1, len(candles)):
-                    prev = float(candles[i-1].get('close', 0))
-                    curr = float(candles[i].get('close', 0))
-                    if prev > 0:
-                        change = abs((curr - prev) / prev)
-                        price_changes.append(change)
-                
-                if not price_changes:
-                    continue
-                    
-                avg_volatility = sum(price_changes) / len(price_changes)
-                
-                # MUCH MORE AGGRESSIVE FILTERS
-                is_quality_symbol = (
-                    avg_volume > 1000000 and              # Lowered from 2,000,000 to 500,000
-                    0.005 < avg_volatility < 0.15 and    # Wider volatility range (was 0.008-0.08)
-                    'USDT' in symbol and                 # Still USDT pairs only
-                    latest_volume > avg_volume * 0.3     # Recent volume activity
-                )
-                
-                if is_quality_symbol:
-                    # Add volume score for sorting
-                    volume_score = avg_volume * (1 + avg_volatility)
-                    core_symbols.append((symbol, volume_score))
-                
-            except Exception as e:
+    """Simple filter - focus on basic criteria only"""
+    global live_candles
+    live_candles = fix_live_candles_structure(live_candles)
+    log(f"✅ Fixed live_candles structure before filtering")
+    
+    filtered = []
+    
+    for symbol in symbols:
+        try:
+            # Basic checks
+            if 'USDT' not in symbol:
                 continue
-        
-        # Sort by volume score (highest first) and return symbols
-        core_symbols.sort(key=lambda x: x[1], reverse=True)
-        filtered_symbols = [symbol for symbol, score in core_symbols]
-        
-        log(f"✅ Filtered to {len(filtered_symbols)} quality symbols from {len(symbols)} total")
-        
-        # Return more symbols - up to 100 instead of 30
-        return filtered_symbols[:500]  # Increased limit
-        
-    except Exception as e:
-        log(f"❌ CORE STRATEGY: Error filtering symbols: {e}", level="ERROR")
-        return symbols[:200]  # Return more symbols on error
+                
+            if symbol not in live_candles:
+                continue
+            
+            # Get any available candles
+            candles = None
+            for tf in ['1', '5', '15']:
+                if tf in live_candles[symbol] and live_candles[symbol][tf]:
+                    tf_data = live_candles[symbol][tf]
+                    if isinstance(tf_data, list) and len(tf_data) >= 5:
+                        candles = tf_data[-20:] if len(tf_data) >= 20 else tf_data
+                        break
+            
+            if not candles or len(candles) < 5:
+                continue
+            
+            # Very basic volume check
+            volumes = [float(c.get('volume', 0)) for c in candles[-5:]]
+            avg_volume = sum(volumes) / len(volumes) if volumes else 0
+            
+            # Low threshold - just need some activity
+            if avg_volume > 10000:  # Very low: 10k volume
+                filtered.append(symbol)
+                
+            # Stop at 50 symbols for efficiency
+            if len(filtered) >= 50:
+                break
+                
+        except Exception as e:
+            log(f"⚠️ Error filtering {symbol}: {e}", level="WARN")
+            continue
+    
+    log(f"✅ Filtered to {len(filtered)} symbols with relaxed criteria")
+    return filtered
 
 
 async def calculate_core_score(symbol, core_candles, trend_context):
@@ -916,6 +888,7 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+
 
 
 

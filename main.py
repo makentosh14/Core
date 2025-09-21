@@ -322,28 +322,37 @@ async def calculate_core_score(symbol, core_candles, trend_context):
         return 6.0  # Good default for transitional markets
 
 def determine_core_direction(core_candles, trend_context):
-    """Determine direction with core strategy alignment requirements"""
+    """Simple direction determination based on momentum"""
     try:
-        base_direction = determine_direction(tf_scores)
-        if not base_direction:
+        # Simple momentum-based direction
+        candles_5m = core_candles.get('5', [])
+        if not candles_5m or len(candles_5m) < 10:
             return None
+            
+        # Check recent price movement
+        recent_closes = [float(c['close']) for c in candles_5m[-10:]]
+        start_price = recent_closes[0]
+        end_price = recent_closes[-1]
         
-        # Core strategy requires trend alignment for higher success rate
+        price_change = (end_price - start_price) / start_price
+        
+        # Simple direction based on price movement
+        if price_change > 0.002:  # 0.2% up
+            direction = "Long"
+        elif price_change < -0.002:  # 0.2% down
+            direction = "Short"
+        else:
+            return None  # No clear direction
+        
+        # Apply trend context filters
         trend_direction = trend_context.get("trend", "neutral")
         trend_strength = trend_context.get("trend_strength", 0.5)
         
-        # For strong trends, require alignment
-        if trend_strength > 0.6:
-            if base_direction.lower() == "long" and trend_direction != "bullish":
-                return None
-            if base_direction.lower() == "short" and trend_direction != "bearish":
-                return None
-        
-        # For weak trends, only allow long positions (safer)
-        if trend_strength < 0.4 and base_direction.lower() == "short":
+        # For strong downtrend, don't allow long positions
+        if trend_strength > 0.6 and trend_direction == "bearish" and direction == "Long":
             return None
-        
-        return base_direction
+            
+        return direction
         
     except Exception as e:
         log(f"❌ CORE STRATEGY: Error determining direction: {e}", level="ERROR")
@@ -888,6 +897,7 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+
 
 
 

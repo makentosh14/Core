@@ -443,6 +443,63 @@ def analyze_multi_timeframe_rsi(candles_by_tf: Dict[str, List[Dict]], symbol: st
     
     return result
 
+def calculate_stoch_rsi(candles: List[Dict], rsi_period: int = 14, 
+                       stoch_period: int = 14, k_period: int = 3, d_period: int = 3) -> Optional[Dict]:
+    """
+    Calculate Stochastic RSI - wrapper for backward compatibility
+    """
+    try:
+        rsi_values = calculate_rsi_wilder(candles, rsi_period, "")
+        if not rsi_values or len(rsi_values) < stoch_period:
+            return None
+            
+        stoch_rsi_values = []
+        k_values = []
+        d_values = []
+        
+        # Calculate Stochastic RSI
+        for i in range(stoch_period - 1, len(rsi_values)):
+            start_idx = max(0, i - stoch_period + 1)
+            end_idx = i + 1
+            rsi_window = rsi_values[start_idx:end_idx]
+            
+            min_rsi = min(rsi_window)
+            max_rsi = max(rsi_window)
+            
+            if max_rsi - min_rsi > 0:
+                stoch_rsi = ((rsi_values[i] - min_rsi) / (max_rsi - min_rsi)) * 100
+            else:
+                stoch_rsi = 50
+                
+            stoch_rsi_values.append(stoch_rsi)
+        
+        # Calculate %K
+        for i in range(k_period - 1, len(stoch_rsi_values)):
+            start_idx = max(0, i - k_period + 1)
+            end_idx = i + 1
+            k = np.mean(stoch_rsi_values[start_idx:end_idx])
+            k_values.append(k)
+        
+        # Calculate %D
+        for i in range(d_period - 1, len(k_values)):
+            start_idx = max(0, i - d_period + 1)
+            end_idx = i + 1
+            d = np.mean(k_values[start_idx:end_idx])
+            d_values.append(d)
+        
+        if not k_values or not d_values:
+            return None
+            
+        return {
+            "k": round(k_values[-1], 2),
+            "d": round(d_values[-1], 2),
+            "overbought": k_values[-1] > 80,
+            "oversold": k_values[-1] < 20,
+        }
+        
+    except Exception as e:
+        return None
+
 # Incremental RSI update for real-time processing
 def update_rsi_incremental(symbol: str, close: float, period: int = 14) -> Optional[float]:
     """
@@ -482,3 +539,4 @@ def calculate_rsi_with_bands(candles: List[Dict], period: int = 14,
     Legacy function - use calculate_rsi_with_scoring for new implementations
     """
     return calculate_rsi_with_scoring(candles, period, "", overbought, oversold)
+

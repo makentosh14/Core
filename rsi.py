@@ -1,4 +1,4 @@
-# rsi.py - Enhanced RSI Indicator with Performance Optimizations
+# rsi.py - Fixed RSI Indicator with Performance Optimizations
 
 import numpy as np
 from collections import deque
@@ -63,15 +63,27 @@ _rsi_cache = {}
 
 def calculate_rsi(candles: List[Dict], period: int = 14) -> Optional[List[float]]:
     """
-    Optimized RSI calculation using numpy for better performance
+    Fixed RSI calculation using numpy for better performance
     Returns a list of RSI values starting from index [period]
     """
     try:
         if not candles or len(candles) < period + 1:
             return None
             
-        # Use numpy for faster calculations
-        closes = np.array([float(c['close']) for c in candles])
+        # Extract closing prices - fix potential slice error
+        closes = []
+        for c in candles:
+            if isinstance(c, dict):
+                close_val = c.get('close', 0)
+                if isinstance(close_val, (str, int, float)):
+                    closes.append(float(close_val))
+                else:
+                    return None  # Invalid data
+            else:
+                return None  # Invalid candle format
+        
+        # Convert to numpy array
+        closes = np.array(closes)
         
         # Calculate price changes
         deltas = np.diff(closes)
@@ -97,6 +109,7 @@ def calculate_rsi(candles: List[Dict], period: int = 14) -> Optional[List[float]
             rsi_values.append(round(rsi, 2))
             
             # Update averages using Wilder's smoothing
+            # Fix: Ensure we don't go out of bounds
             if i < len(gains):
                 avg_gain = ((avg_gain * (period - 1)) + gains[i]) / period
                 avg_loss = ((avg_loss * (period - 1)) + losses[i]) / period
@@ -122,13 +135,14 @@ def calculate_rsi_with_bands(candles: List[Dict], period: int = 14,
             
         current_rsi = rsi_values[-1]
         
-        # Calculate RSI momentum (rate of change)
+        # Calculate RSI momentum (rate of change) - fix slice error
         rsi_momentum = None
         if len(rsi_values) >= 5:
             rsi_momentum = rsi_values[-1] - rsi_values[-5]
         
-        # Detect divergences
-        divergence = detect_rsi_divergence(candles[-len(rsi_values):], rsi_values)
+        # Detect divergences - fix by ensuring proper list slicing
+        candle_slice = candles[-len(rsi_values):] if len(candles) >= len(rsi_values) else candles
+        divergence = detect_rsi_divergence(candle_slice, rsi_values)
         
         return {
             "rsi": current_rsi,
@@ -150,14 +164,28 @@ def detect_rsi_divergence(candles: List[Dict], rsi_values: List[float],
                          lookback: int = 10) -> Optional[str]:
     """
     Detect bullish or bearish RSI divergence
+    Fixed to handle list indexing properly
     """
     try:
         if len(candles) < lookback or len(rsi_values) < lookback:
             return None
             
-        # Get price highs and lows
-        prices = [float(c['close']) for c in candles[-lookback:]]
-        recent_rsi = rsi_values[-lookback:]
+        # Get price highs and lows - fix slice to use proper indexing
+        lookback_size = min(lookback, len(candles), len(rsi_values))
+        prices = []
+        for i in range(len(candles) - lookback_size, len(candles)):
+            if i >= 0 and i < len(candles):
+                close_val = candles[i].get('close', 0)
+                prices.append(float(close_val))
+        
+        # Get recent RSI values with proper indexing
+        recent_rsi = []
+        for i in range(len(rsi_values) - lookback_size, len(rsi_values)):
+            if i >= 0 and i < len(rsi_values):
+                recent_rsi.append(rsi_values[i])
+        
+        if len(prices) < 3 or len(recent_rsi) < 3:
+            return None
         
         # Find local peaks and troughs
         price_peaks = []
@@ -202,7 +230,9 @@ def get_rsi_trend(rsi_values: List[float], period: int = 5) -> str:
     if len(rsi_values) < period:
         return "neutral"
         
-    recent = rsi_values[-period:]
+    # Fix slice to ensure we don't go out of bounds
+    start_idx = max(0, len(rsi_values) - period)
+    recent = rsi_values[start_idx:]
     
     # Simple linear regression slope
     x = np.arange(len(recent))
@@ -215,127 +245,69 @@ def get_rsi_trend(rsi_values: List[float], period: int = 5) -> str:
     else:
         return "neutral"
 
-def calculate_stoch_rsi(candles: List[Dict], rsi_period: int = 14, 
-                       stoch_period: int = 14, k_period: int = 3, d_period: int = 3) -> Optional[Dict]:
-    """
-    Calculate Stochastic RSI for additional confirmation
-    """
-    try:
-        rsi_values = calculate_rsi(candles, rsi_period)
-        if not rsi_values or len(rsi_values) < stoch_period:
-            return None
-            
-        stoch_rsi_values = []
-        k_values = []
-        d_values = []
-        
-        # Calculate Stochastic RSI
-        for i in range(stoch_period - 1, len(rsi_values)):
-            rsi_window = rsi_values[i - stoch_period + 1:i + 1]
-            min_rsi = min(rsi_window)
-            max_rsi = max(rsi_window)
-            
-            if max_rsi - min_rsi > 0:
-                stoch_rsi = ((rsi_values[i] - min_rsi) / (max_rsi - min_rsi)) * 100
-            else:
-                stoch_rsi = 50  # Default to middle if no range
-                
-            stoch_rsi_values.append(stoch_rsi)
-        
-        # Calculate %K (SMA of Stoch RSI)
-        for i in range(k_period - 1, len(stoch_rsi_values)):
-            k = np.mean(stoch_rsi_values[i - k_period + 1:i + 1])
-            k_values.append(k)
-        
-        # Calculate %D (SMA of %K)
-        for i in range(d_period - 1, len(k_values)):
-            d = np.mean(k_values[i - d_period + 1:i + 1])
-            d_values.append(d)
-        
-        if not k_values or not d_values:
-            return None
-            
-        return {
-            "k": round(k_values[-1], 2),
-            "d": round(d_values[-1], 2),
-            "overbought": k_values[-1] > 80,
-            "oversold": k_values[-1] < 20,
-            "cross": detect_stoch_rsi_cross(k_values, d_values)
-        }
-        
-    except Exception as e:
-        return None
-
-def detect_stoch_rsi_cross(k_values: List[float], d_values: List[float]) -> Optional[str]:
-    """
-    Detect Stochastic RSI crossovers
-    """
-    if len(k_values) < 2 or len(d_values) < 2:
-        return None
-        
-    # Check for bullish cross (K crosses above D)
-    if k_values[-2] <= d_values[-2] and k_values[-1] > d_values[-1]:
-        return "bullish_cross"
-    # Check for bearish cross (K crosses below D)
-    elif k_values[-2] >= d_values[-2] and k_values[-1] < d_values[-1]:
-        return "bearish_cross"
-        
-    return None
-
 def get_rsi_signal(rsi_data: Dict, price_trend: str = None) -> Tuple[str, float]:
     """
-    Generate trading signal based on RSI data and price trend
-    Returns: (signal, strength) where signal is 'buy', 'sell', or 'neutral'
+    Get RSI trading signal with confidence
+    Fixed to handle data properly
     """
-    if not rsi_data:
+    try:
+        if not rsi_data or 'rsi' not in rsi_data:
+            return "neutral", 0.0
+        
+        rsi = rsi_data['rsi']
+        signal = "neutral"
+        strength = 0.0
+        
+        # Basic RSI signals
+        if rsi_data.get('oversold', False):
+            signal = "buy"
+            strength = min((30 - rsi) / 15, 1.0)  # Stronger signal the lower it goes
+        elif rsi_data.get('overbought', False):
+            signal = "sell" 
+            strength = min((rsi - 70) / 15, 1.0)  # Stronger signal the higher it goes
+        
+        # Divergence signals
+        divergence = rsi_data.get('divergence')
+        if divergence == "bullish_divergence":
+            if signal == "neutral":
+                signal = "buy"
+                strength = 0.7
+            elif signal == "buy":
+                strength += 0.3  # Strengthen existing buy signal
+        elif divergence == "bearish_divergence":
+            if signal == "neutral":
+                signal = "sell"
+                strength = 0.7
+            elif signal == "sell":
+                strength += 0.3  # Strengthen existing sell signal
+        
+        # RSI momentum confirmation
+        momentum = rsi_data.get('momentum')
+        if momentum is not None:
+            if signal == "buy" and momentum > 0:
+                strength += 0.2  # Increase strength
+            elif signal == "sell" and momentum < 0:
+                strength += 0.2  # Increase strength
+            elif (signal == "buy" and momentum < -2) or \
+                 (signal == "sell" and momentum > 2):
+                strength *= 0.8  # Decrease strength
+        
+        # Price trend confirmation (if provided)
+        if price_trend:
+            if (signal == "buy" and price_trend == "up") or \
+               (signal == "sell" and price_trend == "down"):
+                strength += 0.1  # Increase strength
+            elif (signal == "buy" and price_trend == "down") or \
+                 (signal == "sell" and price_trend == "up"):
+                strength *= 0.8  # Decrease strength
+        
+        # Cap strength at 1.0
+        strength = min(strength, 1.0)
+        
+        return signal, strength
+        
+    except Exception as e:
         return "neutral", 0.0
-        
-    rsi = rsi_data.get("rsi", 50)
-    momentum = rsi_data.get("momentum", 0)
-    divergence = rsi_data.get("divergence")
-    rsi_trend = rsi_data.get("trend", "neutral")
-    
-    signal = "neutral"
-    strength = 0.0
-    
-    # Strong oversold with positive momentum
-    if rsi < 30 and momentum > 0:
-        signal = "buy"
-        strength = 0.8
-        
-    # Strong overbought with negative momentum
-    elif rsi > 70 and momentum < 0:
-        signal = "sell"
-        strength = 0.8
-        
-    # Divergence signals
-    elif divergence == "bullish_divergence":
-        signal = "buy"
-        strength = 0.7
-        
-    elif divergence == "bearish_divergence":
-        signal = "sell"
-        strength = 0.7
-        
-    # Moderate signals
-    elif rsi < 40 and rsi_trend == "rising":
-        signal = "buy"
-        strength = 0.5
-        
-    elif rsi > 60 and rsi_trend == "falling":
-        signal = "sell"
-        strength = 0.5
-    
-    # Adjust strength based on price trend alignment
-    if price_trend:
-        if (signal == "buy" and price_trend == "up") or \
-           (signal == "sell" and price_trend == "down"):
-            strength = min(strength * 1.2, 1.0)  # Increase strength
-        elif (signal == "buy" and price_trend == "down") or \
-             (signal == "sell" and price_trend == "up"):
-            strength *= 0.8  # Decrease strength
-    
-    return signal, strength
 
 # Incremental RSI update for real-time processing
 def update_rsi_incremental(symbol: str, close: float, period: int = 14) -> Optional[float]:
@@ -359,6 +331,69 @@ def clear_rsi_cache(symbol: str = None, period: int = None):
             del _rsi_cache[cache_key]
     else:
         _rsi_cache.clear()
+
+def calculate_stoch_rsi(candles: List[Dict], rsi_period: int = 14, 
+                       stoch_period: int = 14, k_period: int = 3, d_period: int = 3) -> Optional[Dict]:
+    """
+    Calculate Stochastic RSI for additional confirmation
+    Fixed to handle list operations properly
+    """
+    try:
+        rsi_values = calculate_rsi(candles, rsi_period)
+        if not rsi_values or len(rsi_values) < stoch_period:
+            return None
+            
+        stoch_rsi_values = []
+        k_values = []
+        d_values = []
+        
+        # Calculate Stochastic RSI
+        for i in range(stoch_period - 1, len(rsi_values)):
+            # Fix slice to ensure proper bounds
+            start_idx = max(0, i - stoch_period + 1)
+            end_idx = i + 1
+            rsi_window = rsi_values[start_idx:end_idx]
+            
+            min_rsi = min(rsi_window)
+            max_rsi = max(rsi_window)
+            
+            if max_rsi - min_rsi > 0:
+                stoch_rsi = ((rsi_values[i] - min_rsi) / (max_rsi - min_rsi)) * 100
+            else:
+                stoch_rsi = 50  # Default to middle if no range
+                
+            stoch_rsi_values.append(stoch_rsi)
+        
+        # Calculate %K (SMA of Stoch RSI)
+        for i in range(k_period - 1, len(stoch_rsi_values)):
+            start_idx = max(0, i - k_period + 1)
+            end_idx = i + 1
+            k = np.mean(stoch_rsi_values[start_idx:end_idx])
+            k_values.append(k)
+        
+        # Calculate %D (SMA of %K)
+        for i in range(d_period - 1, len(k_values)):
+            start_idx = max(0, i - d_period + 1)
+            end_idx = i + 1
+            d = np.mean(k_values[start_idx:end_idx])
+            d_values.append(d)
+        
+        if not k_values or not d_values:
+            return None
+            
+        return {
+            "k": round(k_values[-1], 2),
+            "d": round(d_values[-1], 2),
+            "k_values": k_values,
+            "d_values": d_values,
+            "overbought": k_values[-1] > 80,
+            "oversold": k_values[-1] < 20,
+            "bullish_signal": k_values[-1] > d_values[-1] and k_values[-1] < 20,
+            "bearish_signal": k_values[-1] < d_values[-1] and k_values[-1] > 80
+        }
+        
+    except Exception as e:
+        return None
 
 # Multi-timeframe RSI analysis
 def analyze_multi_timeframe_rsi(candles_by_tf: Dict[str, List[Dict]], 

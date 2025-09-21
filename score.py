@@ -1,7 +1,7 @@
 # score.py - Enhanced with Advanced Pattern Detection Integration
 
 from logger import log
-from rsi import calculate_rsi, calculate_rsi_with_bands, calculate_stoch_rsi, analyze_multi_timeframe_rsi, detect_rsi_divergence
+from rsi import calculate_rsi, calculate_rsi_with_bands, calculate_stoch_rsi, analyze_multi_timeframe_rsi, detect_rsi_divergence, calculate_rsi_with_scoring
 from macd import detect_macd_cross, get_macd_divergence, get_macd_momentum
 from supertrend import calculate_supertrend_signal, get_supertrend_state, detect_supertrend_squeeze, calculate_multi_timeframe_supertrend
 from ema import detect_ema_crossover, calculate_ema_ribbon, analyze_ema_ribbon, detect_ema_squeeze

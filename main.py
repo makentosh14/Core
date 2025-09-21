@@ -52,6 +52,53 @@ MAX_SWING_POSITIONS = 1     # Maximum 1 swing position
 # Core strategy variables
 startup_time = time.time()
 
+def fix_live_candles_structure(live_candles):
+    """
+    Convert generators/iterators to lists in live_candles structure
+    This fixes all slice errors by ensuring proper list types
+    """
+    try:
+        if not live_candles:
+            return {}
+            
+        fixed_candles = {}
+        
+        for symbol, timeframes in live_candles.items():
+            if not isinstance(timeframes, dict):
+                continue
+                
+            fixed_candles[symbol] = {}
+            
+            for tf, candle_data in timeframes.items():
+                if candle_data is None:
+                    fixed_candles[symbol][tf] = []
+                    continue
+                
+                # Convert any iterable to a proper list
+                try:
+                    if isinstance(candle_data, list):
+                        # Already a proper list
+                        fixed_candles[symbol][tf] = candle_data
+                    elif hasattr(candle_data, '__iter__') and not isinstance(candle_data, (str, bytes, dict)):
+                        # It's an iterable (generator, iterator, tuple, etc.) - convert to list
+                        candle_list = list(candle_data)
+                        fixed_candles[symbol][tf] = candle_list
+                        log(f"🔧 Fixed {symbol}[{tf}]: converted {type(candle_data)} to list with {len(candle_list)} items")
+                    else:
+                        # Not iterable or wrong type
+                        log(f"⚠️ Skipping {symbol}[{tf}]: unsupported type {type(candle_data)}", level="WARN")
+                        fixed_candles[symbol][tf] = []
+                        
+                except Exception as e:
+                    log(f"❌ Error converting {symbol}[{tf}]: {e}", level="ERROR")
+                    fixed_candles[symbol][tf] = []
+        
+        return fixed_candles
+        
+    except Exception as e:
+        log(f"❌ Error fixing live_candles structure: {e}", level="ERROR")
+        return live_candles  # Return original if fix fails
+
 def safe_get_candles(live_candles, symbol):
     """Safe candle extraction"""
     try:
@@ -196,10 +243,16 @@ async def core_strategy_scan(symbols, trend_context):
 
 async def filter_core_symbols(symbols):
     """Filter symbols for core strategy - FIXED and more aggressive"""
+
     try:
-        core_symbols = []
-        
         log(f"🔍 Filtering {len(symbols)} symbols for core strategy...")
+        
+        # ADD THIS LINE HERE:
+        global live_candles
+        live_candles = fix_live_candles_structure(live_candles)
+        log(f"✅ Fixed live_candles structure before filtering")
+        
+        core_symbols = []
         
         for symbol in symbols:
             try:
@@ -863,6 +916,7 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+
 
 
 

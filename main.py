@@ -184,19 +184,23 @@ async def core_strategy_scan(symbols, trend_context):
 
                 # === CORE STRATEGY SIGNAL GENERATION ===
                 
-                # 1. Calculate core score with strict requirements
+                # 1. Get full scoring data (we need this anyway)
+                score_result = score_symbol(symbol, core_candles, trend_context) 
+                score, tf_scores, trade_type, indicator_scores, used_indicators = score_result
+
+                # 2. Calculate core score with momentum bonus
                 core_score = await calculate_core_score(symbol, core_candles, trend_context)
                 if core_score < MIN_SCALP_SCORE:
                     continue
 
-                # 2. Determine direction with trend alignment
+                # 3. Determine direction
                 direction = determine_core_direction(core_candles, trend_context)
                 if not direction:
                     continue
 
-                # 3. Calculate confidence with higher threshold
-                confidence = calculate_confidence(core_candles, trend_context)
-                if confidence < 60:  # Minimum 70% confidence for core strategy
+                # 4. Calculate confidence (now we have all required parameters)
+                confidence = calculate_confidence(score, tf_scores, trend_context, trade_type)
+                if confidence < 60:
                     continue
 
                 # 4. Validate core strategy conditions
@@ -897,6 +901,7 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+
 
 
 

@@ -155,12 +155,14 @@ def enhanced_score_symbol(symbol, candles_by_timeframe, market_context=None):
             rsi_values = calculate_rsi(candles_15m)
             if rsi_values:
                 rsi_div_result = detect_rsi_divergence(candles_15m, rsi_values, symbol)
-                if rsi_div_result:
-                    rsi_div = {"type": "bullish" if rsi_div_result == "bullish_divergence" else "bearish"}
-                else:
-                    rsi_div = None
-                    
-                    # Add to scoring
+                rsi_div = None
+                if rsi_div_result == "bullish_divergence":
+                    rsi_div = {"type": "bullish"}
+                elif rsi_div_result == "bearish_divergence":
+                    rsi_div = {"type": "bearish"}
+
+                # Add to scoring only if we have a divergence
+                if rsi_div:
                     if rsi_div["type"] == "bullish" and direction == "Long":
                         original_score += 0.8
                         indicator_scores["rsi_divergence_bullish"] = 0.8
@@ -168,7 +170,6 @@ def enhanced_score_symbol(symbol, candles_by_timeframe, market_context=None):
                         original_score += 0.8
                         indicator_scores["rsi_divergence_bearish"] = 0.8
                     else:
-                        # Divergence against our direction
                         original_score -= 1.0
                         indicator_scores["rsi_divergence_against"] = -1.0
     
@@ -883,11 +884,11 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
         used_indicators.add("mtf_supertrend")
     
     # RSI MTF Confluence
-    if mtf_rsi.get('buy_confluence', 0) > 0.6:
+    if mtf_rsi.get('overall_signal') == 'bullish' and mtf_rsi.get('confluence_strength', 0) > 0.6:
         type_scores[best_type] += WEIGHTS["rsi_mtf"]
         indicator_scores["mtf_rsi"] = WEIGHTS["rsi_mtf"]
         used_indicators.add("mtf_rsi")
-    elif mtf_rsi.get('sell_confluence', 0) > 0.6:
+    elif mtf_rsi.get('overall_signal') == 'bearish' and mtf_rsi.get('confluence_strength', 0) > 0.6:
         type_scores[best_type] -= WEIGHTS["rsi_mtf"]
         indicator_scores["mtf_rsi"] = -WEIGHTS["rsi_mtf"]
         used_indicators.add("mtf_rsi")

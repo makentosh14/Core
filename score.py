@@ -154,9 +154,11 @@ def enhanced_score_symbol(symbol, candles_by_timeframe, market_context=None):
             from rsi import calculate_rsi
             rsi_values = calculate_rsi(candles_15m)
             if rsi_values:
-                rsi_div = divergence_detector.detect_rsi_divergence(candles_15m, rsi_values)
-                if rsi_div:
-                    divergences_found.append(rsi_div)
+                rsi_div_result = detect_rsi_divergence(candles_15m, rsi_values, symbol)
+                if rsi_div_result:
+                    rsi_div = {"type": "bullish" if rsi_div_result == "bullish_divergence" else "bearish"}
+                else:
+                    rsi_div = None
                     
                     # Add to scoring
                     if rsi_div["type"] == "bullish" and direction == "Long":

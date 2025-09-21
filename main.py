@@ -52,6 +52,36 @@ MAX_SWING_POSITIONS = 1     # Maximum 1 swing position
 # Core strategy variables
 startup_time = time.time()
 
+def safe_get_candles(live_candles, symbol):
+    """Safe candle extraction"""
+    try:
+        candles = None
+        for tf in ['1', '5', '15']:
+            if (symbol in live_candles and 
+                tf in live_candles[symbol] and 
+                live_candles[symbol][tf]):
+                
+                candle_data = live_candles[symbol][tf]
+                
+                # Ensure it's a proper list/sequence
+                if isinstance(candle_data, (list, tuple)):
+                    if len(candle_data) > 0:
+                        candles = list(candle_data[-20:]) if len(candle_data) >= 20 else list(candle_data)
+                        break
+                elif hasattr(candle_data, '__len__') and hasattr(candle_data, '__getitem__'):
+                    # It's sequence-like but not list/tuple
+                    try:
+                        candle_list = list(candle_data)
+                        if len(candle_list) > 0:
+                            candles = candle_list[-20:] if len(candle_list) >= 20 else candle_list
+                            break
+                    except:
+                        continue
+        return candles
+    except Exception as e:
+        print(f"❌ Safe candle extraction error for {symbol}: {e}")
+        return None
+
 async def core_strategy_scan(symbols, trend_context):
     """
     PURE CORE STRATEGY - Single focused trading approach
@@ -178,11 +208,7 @@ async def filter_core_symbols(symbols):
                     continue
                 
                 # Try to get candles from any available timeframe
-                candles = None
-                for tf in ['1', '5', '15']:  # Try multiple timeframes
-                    if tf in live_candles[symbol] and live_candles[symbol][tf]:
-                        candles = live_candles[symbol][tf][-20:]
-                        break
+                candles = safe_get_candles(live_candles, symbol)
                 
                 if not candles or len(candles) < 20:  # Reduced from 20 to 10
                     continue
@@ -837,6 +863,7 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+
 
 
 

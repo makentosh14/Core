@@ -190,7 +190,7 @@ async def core_strategy_scan(symbols, trend_context):
                     continue
 
                 # 2. Determine direction with trend alignment
-                base_direction = determine_direction(tf_scores)
+                direction = determine_core_direction(core_candles, trend_context)
                 if not direction:
                     continue
 
@@ -897,6 +897,7 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+
 
 
 

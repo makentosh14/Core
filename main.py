@@ -157,7 +157,7 @@ async def core_strategy_scan(symbols, trend_context):
         # Focus on high-quality symbols only
         quality_symbols = await filter_core_symbols(symbols)
         
-        for symbol in symbols:  # Limit to top 20 symbols for focus
+        for symbol in quality_symbols:  # Limit to top 20 symbols for focus
             try:
                 # Skip if already have position
                 if symbol in active_trades and not active_trades[symbol].get("exited", False):
@@ -888,6 +888,7 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+
 
 
 

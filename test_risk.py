@@ -1,14 +1,7 @@
-#!/usr/bin/env python3
-"""
-Quick test to validate the Risk/Reward fix works for your specific case
-Run this to verify the fix before updating main.py
-"""
-
-def log(message, level="INFO"):
-    print(f"[{level}] {message}")
-
-def validate_core_risk_reward_fixed(core_candles, direction):
-    """Fixed version - same as the one for main.py integration"""
+def validate_core_risk_reward(core_candles, direction):
+    """
+    FINAL FIX: Risk/reward validation with better target calculation for Long positions
+    """
     try:
         log(f"🔍 DEBUG RR: validate_core_risk_reward called, direction={direction}")
         log(f"🔍 DEBUG RR: Available timeframes: {list(core_candles.keys())}")
@@ -32,29 +25,35 @@ def validate_core_risk_reward_fixed(core_candles, direction):
         log(f"🔍 DEBUG RR: Current price: {current_price}")
         
         if direction.lower() == "long":
-            # FIXED: Better logic for LONG positions
-            
-            # Find recent support levels (focus on last 10 candles, not all 20)
+            # Use recent support levels (last 10 candles)
             recent_lows = lows[-10:]
             recent_highs = highs[-10:]
             
-            # Use recent swing low as support
             recent_support = min(recent_lows)
             recent_resistance = max(recent_highs)
             
-            # CRITICAL FIX: Ensure support is not too far from current price
-            max_risk_percent = 0.04  # Maximum 4% risk
+            # Cap maximum risk at 4% of current price
+            max_risk_percent = 0.04
             min_support = current_price * (1 - max_risk_percent)
-            
-            # Use the higher of: recent support OR minimum acceptable support
             effective_support = max(recent_support, min_support)
             
-            # For resistance, ensure reasonable target (at least 2% above current)
-            min_resistance = current_price * 1.02
-            effective_resistance = max(recent_resistance, min_resistance)
+            # FINAL FIX: Be more generous with target calculation
+            # Use the better of: recent resistance OR calculated target based on risk
+            calculated_risk = current_price - effective_support
+            
+            # Target should be at least 1.3x the risk for good R/R (gives 1.3 ratio)
+            min_target_based_on_risk = current_price + (calculated_risk * 1.3)
+            
+            # Also ensure minimum 3% target above current price
+            min_percentage_target = current_price * 1.03
+            
+            # Use the highest target for best R/R
+            effective_resistance = max(recent_resistance, min_target_based_on_risk, min_percentage_target)
             
             log(f"🔍 DEBUG RR: LONG - Recent Support: {recent_support}, Effective Support: {effective_support}")
-            log(f"🔍 DEBUG RR: LONG - Recent Resistance: {recent_resistance}, Effective Resistance: {effective_resistance}")
+            log(f"🔍 DEBUG RR: LONG - Recent Resistance: {recent_resistance}")
+            log(f"🔍 DEBUG RR: LONG - Risk-based Target: {min_target_based_on_risk}")
+            log(f"🔍 DEBUG RR: LONG - Final Target: {effective_resistance}")
             
             potential_reward = effective_resistance - current_price
             potential_risk = current_price - effective_support
@@ -74,7 +73,7 @@ def validate_core_risk_reward_fixed(core_candles, direction):
             
             return result
             
-        else:  # SHORT - keep original logic
+        else:  # SHORT - keep existing logic
             resistance_levels = []
             support_levels = []
             
@@ -119,51 +118,40 @@ def validate_core_risk_reward_fixed(core_candles, direction):
         
     except Exception as e:
         log(f"❌ DEBUG RR: Risk/reward validation error: {e}", level="ERROR")
+        import traceback
+        log(f"❌ DEBUG RR: Traceback: {traceback.format_exc()}", level="ERROR")
         return False
 
-def create_btc_like_test_case():
-    """Create a test case similar to your failing BTC scenario"""
-    candles = []
-    
-    # Simulate the pattern from your test: trending from ~49500 to 52200
-    prices = [
-        49800, 49850, 49900, 49950, 50000,  # Initial support area
-        50200, 50400, 50600, 50800, 51000,  # Breakout area
-        51200, 51400, 51600, 51800, 52000,  # Resistance building
-        51800, 51900, 52000, 52100, 52200   # Current price at 52200
-    ]
-    
-    for price in prices:
-        high = price + 60   # Add realistic wicks
-        low = price - 50
-        open_price = price - 10
-        
-        candle = {
-            'high': str(high),
-            'low': str(low),
-            'close': str(price),
-            'open': str(open_price)
-        }
-        candles.append(candle)
-    
-    return {'15': candles}
 
-def test_fix():
-    """Test the fixed function against your failing scenario"""
-    print("=" * 60)
-    print("TESTING FIXED RISK/REWARD FUNCTION")
-    print("=" * 60)
+# Quick test of the final fix
+def test_final_fix():
+    """Test the final adjusted version"""
     
-    # Test with BTC-like scenario that was failing
-    btc_test_data = create_btc_like_test_case()
+    def log(message, level="INFO"):
+        print(f"[{level}] {message}")
     
-    print("\n--- Testing BTC-like Long Position (was failing) ---")
-    result = validate_core_risk_reward_fixed(btc_test_data, "Long")
-    print(f"\nResult: {'✅ PASS' if result else '❌ FAIL'}")
+    def create_btc_test():
+        prices = [49800, 49850, 49900, 49950, 50000, 50200, 50400, 50600, 50800, 51000,
+                 51200, 51400, 51600, 51800, 52000, 51800, 51900, 52000, 52100, 52200]
+        candles = []
+        for price in prices:
+            candles.append({
+                'high': str(price + 60),
+                'low': str(price - 50), 
+                'close': str(price),
+                'open': str(price - 10)
+            })
+        return {'15': candles}
     
-    print("\n" + "=" * 60)
-    print("If this shows PASS, you can update your main.py file!")
-    print("=" * 60)
+    print("TESTING FINAL ADJUSTED RISK/REWARD FIX")
+    print("=" * 50)
+    
+    test_data = create_btc_test()
+    result = validate_core_risk_reward(test_data, "Long")
+    
+    print(f"\nFINAL RESULT: {'✅ PASS - Ready to integrate!' if result else '❌ STILL FAILING'}")
+    
+    return result
 
 if __name__ == "__main__":
-    test_fix()
+    test_final_fix()

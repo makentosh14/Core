@@ -363,28 +363,42 @@ def determine_core_direction(core_candles, trend_context):
         return None
 
 async def validate_core_conditions(symbol, core_candles, direction, trend_context):
-    """Validate core strategy specific conditions"""
+    """FIXED: Validate core strategy specific conditions with relaxed requirements"""
     try:
+        # Debug logging
+        log(f"🔍 Validating core conditions for {symbol} {direction}")
+        
         # 1. Volume validation - must be above average
-        if not validate_core_volume(core_candles):
+        volume_ok = validate_core_volume(core_candles)
+        log(f"   Volume check: {'✅' if volume_ok else '❌'}")
+        if not volume_ok:
             return False
         
         # 2. Price action quality
-        if not validate_core_price_action(core_candles, direction):
+        price_action_ok = validate_core_price_action(core_candles, direction)
+        log(f"   Price action check: {'✅' if price_action_ok else '❌'}")
+        if not price_action_ok:
             return False
         
         # 3. Risk/reward validation
-        if not validate_core_risk_reward(core_candles, direction):
+        risk_reward_ok = validate_core_risk_reward(core_candles, direction)
+        log(f"   Risk/reward check: {'✅' if risk_reward_ok else '❌'}")
+        if not risk_reward_ok:
             return False
         
         # 4. Market timing validation
-        if not validate_core_timing():
+        timing_ok = validate_core_timing()
+        log(f"   Timing check: {'✅' if timing_ok else '❌'}")
+        if not timing_ok:
             return False
         
-        # 5. Trend coherence across timeframes
-        if not validate_core_trend_coherence(core_candles, direction):
+        # 5. Trend coherence across timeframes - FIXED
+        trend_coherence_ok = validate_core_trend_coherence(core_candles, direction)
+        log(f"   Trend coherence check: {'✅' if trend_coherence_ok else '❌'}")
+        if not trend_coherence_ok:
             return False
         
+        log(f"✅ All core conditions passed for {symbol}")
         return True
         
     except Exception as e:
@@ -406,10 +420,11 @@ def validate_core_volume(core_candles):
         avg_volume = sum(volumes) / len(volumes)
         recent_volume = sum(volumes[-5:]) / 5  # Last 5 candles average
         
-        # Recent volume must be significantly above average
-        return recent_volume > avg_volume * 1.5
+        # RELAXED: Recent volume must be above average (removed 1.5x requirement)
+        return recent_volume > avg_volume * 1.2
         
     except Exception as e:
+        log(f"Volume validation error: {e}", level="WARN")
         return False
 
 def validate_core_price_action(core_candles, direction):
@@ -424,103 +439,110 @@ def validate_core_price_action(core_candles, direction):
         if len(closes) < 10:
             return False
         
-        # Check for clean directional movement
+        # RELAXED: Check for general directional movement
         if direction.lower() == "long":
-            # For long signals, require general upward trend in recent closes
+            # For long signals, require some upward movement
             upward_moves = sum(1 for i in range(1, len(closes)) if closes[i] > closes[i-1])
-            return upward_moves >= 6  # At least 60% upward moves
+            return upward_moves >= 4  # At least 40% upward moves (was 60%)
         else:
-            # For short signals, require general downward trend
+            # For short signals, require some downward movement
             downward_moves = sum(1 for i in range(1, len(closes)) if closes[i] < closes[i-1])
-            return downward_moves >= 6  # At least 60% downward moves
+            return downward_moves >= 4  # At least 40% downward moves
         
     except Exception as e:
+        log(f"Price action validation error: {e}", level="WARN")
         return False
 
 def validate_core_risk_reward(core_candles, direction):
-    """Validate risk/reward ratio is favorable"""
+    """Validate risk/reward setup"""
     try:
         if '15' not in core_candles:
             return False
         
-        candles = core_candles['15'][-20:]
-        if len(candles) < 20:
+        candles = core_candles['15'][-5:]
+        if len(candles) < 5:
             return False
         
-        # Calculate recent support/resistance levels
         highs = [float(c.get('high', 0)) for c in candles]
         lows = [float(c.get('low', 0)) for c in candles]
-        current_price = float(candles[-1].get('close', 0))
+        closes = [float(c.get('close', 0)) for c in candles]
+        
+        current_price = closes[-1]
         
         if direction.lower() == "long":
-            resistance = max(highs[-10:])  # Recent resistance
-            support = min(lows[-10:])      # Recent support
+            # For long: check if we have clear resistance above and support below
+            resistance = max(highs)
+            support = min(lows)
             
-            # Risk = distance to support, Reward = distance to resistance
-            risk = current_price - support
-            reward = resistance - current_price
+            # RELAXED: Simple risk/reward check
+            potential_reward = resistance - current_price
+            potential_risk = current_price - support
             
-            if risk > 0 and reward > 0:
-                risk_reward_ratio = reward / risk
-                return risk_reward_ratio >= 2.0  # Minimum 2:1 R/R
-        
-        else:  # short
-            resistance = max(highs[-10:])
-            support = min(lows[-10:])
+            # Risk/reward ratio should be at least 1:1.5 (was 1:2)
+            return potential_reward > 0 and potential_risk > 0 and (potential_reward / potential_risk) >= 1.2
+        else:
+            # For short: opposite logic
+            resistance = max(highs)
+            support = min(lows)
             
-            risk = resistance - current_price
-            reward = current_price - support
+            potential_reward = current_price - support
+            potential_risk = resistance - current_price
             
-            if risk > 0 and reward > 0:
-                risk_reward_ratio = reward / risk
-                return risk_reward_ratio >= 2.0
-        
-        return False
+            return potential_reward > 0 and potential_risk > 0 and (potential_reward / potential_risk) >= 1.2
         
     except Exception as e:
+        log(f"Risk/reward validation error: {e}", level="WARN")
         return False
 
 def validate_core_timing():
     """Validate market timing for core strategy"""
     try:
+        from datetime import datetime
         current_hour = datetime.utcnow().hour
         
-        # Core strategy only trades during peak liquidity hours
-        peak_hours = list(range(8, 23))  # 8 AM to 11 PM UTC
+        # RELAXED: Extended trading hours (was 8-23, now 6-23)
+        peak_hours = list(range(6, 24))  # 6 AM to 11 PM UTC
         
         return current_hour in peak_hours
         
     except Exception as e:
+        log(f"Timing validation error: {e}", level="WARN")
         return True  # Default to True on error
 
 def validate_core_trend_coherence(core_candles, direction):
-    """Validate trend coherence across all timeframes"""
+    """FIXED: Validate trend coherence across AVAILABLE timeframes only"""
     try:
         trend_scores = {}
         
-        for tf in ['1', '5', '15', '30', '60', '240']:
-            if tf not in core_candles:
-                return False
-            
+        # FIXED: Only check timeframes that are actually available
+        available_timeframes = [tf for tf in ['1', '5', '15'] if tf in core_candles]
+        
+        if len(available_timeframes) < 2:  # Need at least 2 timeframes
+            return False
+        
+        for tf in available_timeframes:
             candles = core_candles[tf][-20:]
             closes = [float(c.get('close', 0)) for c in candles]
             
-            if len(closes) < 20:
-                return False
+            if len(closes) < 10:  # RELAXED: Reduced from 20 to 10
+                continue
             
             # Calculate trend direction for this timeframe
-            start_price = sum(closes[:5]) / 5  # First 5 candles average
-            end_price = sum(closes[-5:]) / 5   # Last 5 candles average
+            start_price = sum(closes[:3]) / 3  # RELAXED: First 3 candles (was 5)
+            end_price = sum(closes[-3:]) / 3   # RELAXED: Last 3 candles (was 5)
             
             trend_scores[tf] = (end_price - start_price) / start_price
         
-        # All timeframes should agree on direction
+        # RELAXED: Majority of timeframes should agree on direction
         if direction.lower() == "long":
-            return all(score > 0.005 for score in trend_scores.values())  # All uptrends
+            positive_trends = sum(1 for score in trend_scores.values() if score > 0.001)  # RELAXED: 0.1% threshold
+            return positive_trends >= len(trend_scores) * 0.6  # 60% agreement
         else:
-            return all(score < -0.005 for score in trend_scores.values())  # All downtrends
+            negative_trends = sum(1 for score in trend_scores.values() if score < -0.001)
+            return negative_trends >= len(trend_scores) * 0.6  # 60% agreement
         
     except Exception as e:
+        log(f"Trend coherence validation error: {e}", level="WARN")
         return False
 
 def determine_core_strategy_type(score, confidence, trend_strength):
@@ -901,6 +923,7 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+
 
 
 

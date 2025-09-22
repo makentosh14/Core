@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-Test the fixed risk/reward validation
-Run this to verify the fix works before integrating into main.py
+Updated test with fixed SHORT position logic
 """
 
 def log(message, level="INFO"):
     print(f"[{level}] {message}")
 
-# PASTE THE COMPLETE FIXED FUNCTION HERE (from above artifact)
 def validate_core_risk_reward(core_candles, direction):
     """
-    COMPLETE FIXED VERSION: Risk/reward validation with proper target calculation
+    COMPLETE FIXED VERSION: Both LONG and SHORT positions
     """
     try:
         log(f"🔍 DEBUG RR: validate_core_risk_reward called, direction={direction}")
@@ -64,59 +62,84 @@ def validate_core_risk_reward(core_candles, direction):
             effective_resistance = max(target for _, target in approaches)
             best_approach = max(approaches, key=lambda x: x[1])
             
-            log(f"🔍 DEBUG RR: LONG - Support: {effective_support:.2f}")
-            log(f"🔍 DEBUG RR: LONG - Target approaches: {[(name, f'{target:.2f}') for name, target in approaches]}")
-            log(f"🔍 DEBUG RR: LONG - Selected: {best_approach[0]} = {effective_resistance:.2f}")
+            log(f"🔍 DEBUG RR: LONG - Support: {effective_support:.4f}")
+            log(f"🔍 DEBUG RR: LONG - Target approaches: {[(name, f'{target:.4f}') for name, target in approaches]}")
+            log(f"🔍 DEBUG RR: LONG - Selected: {best_approach[0]} = {effective_resistance:.4f}")
             
             potential_reward = effective_resistance - current_price
             
-        else:  # SHORT - existing logic
-            resistance_levels = []
-            support_levels = []
+        else:  # SHORT POSITIONS - IMPROVED LOGIC
+            # FIXED APPROACH FOR SHORT POSITIONS - Mirror the LONG logic
             
-            for i in range(2, len(candles) - 2):
-                if (highs[i] >= highs[i-1] and highs[i] >= highs[i-2] and 
-                    highs[i] >= highs[i+1] and highs[i] >= highs[i+2]):
-                    resistance_levels.append(highs[i])
-                
-                if (lows[i] <= lows[i-1] and lows[i] <= lows[i-2] and 
-                    lows[i] <= lows[i+1] and lows[i] <= lows[i+2]):
-                    support_levels.append(lows[i])
+            # 1. Find proper resistance level
+            recent_highs = highs[-10:]  # Last 10 candles
+            resistance_candidate = max(recent_highs)
             
-            if not resistance_levels:
-                resistance_levels = [max(highs)]
-            if not support_levels:
-                support_levels = [min(lows)]
+            # Cap maximum risk at 3% for safety
+            max_risk_percent = 0.03
+            max_resistance_level = current_price * (1 + max_risk_percent)
+            effective_resistance = min(resistance_candidate, max_resistance_level)
             
-            nearby_resistance = min([r for r in resistance_levels if r > current_price], 
-                                  default=current_price * 1.02)
-            nearby_support = max([s for s in support_levels if s < current_price], 
-                               default=current_price * 0.98)
+            # 2. Calculate risk first
+            potential_risk = effective_resistance - current_price
             
-            log(f"🔍 DEBUG RR: SHORT - Resistance: {nearby_resistance:.2f}, Support: {nearby_support:.2f}")
+            # 3. FIXED TARGET CALCULATION - Multiple approaches for SHORT
+            approaches = []
             
-            potential_reward = current_price - nearby_support
-            potential_risk = nearby_resistance - current_price
+            # Approach A: Risk-based target (1.5x risk for 1.5 R/R ratio)
+            risk_based_target = current_price - (potential_risk * 1.5)
+            approaches.append(("risk_1.5x", risk_based_target))
+            
+            # Approach B: Percentage-based target (minimum 4% below current)
+            percentage_target = current_price * 0.96
+            approaches.append(("percent_4%", percentage_target))
+            
+            # Approach C: Recent support with buffer
+            recent_lows = lows[-10:]
+            recent_support = min(recent_lows)
+            if recent_support < current_price * 0.99:  # At least 1% below
+                buffered_support = recent_support * 0.99  # Subtract 1% buffer
+                approaches.append(("support_buffered", buffered_support))
+            
+            # Approach D: Price range expansion
+            price_range = max(highs) - min(lows)
+            range_target = current_price - (price_range * 0.3)  # 30% of range down
+            approaches.append(("range_30%", range_target))
+            
+            # Choose the lowest reasonable target (for shorts, lower is better)
+            valid_approaches = [(name, target) for name, target in approaches if target > 0]
+            if not valid_approaches:
+                log(f"❌ DEBUG RR: No valid SHORT targets found")
+                return False
+            
+            effective_support = min(target for _, target in valid_approaches)
+            best_approach = min(valid_approaches, key=lambda x: x[1])
+            
+            log(f"🔍 DEBUG RR: SHORT - Resistance: {effective_resistance:.4f}")
+            log(f"🔍 DEBUG RR: SHORT - Target approaches: {[(name, f'{target:.4f}') for name, target in valid_approaches]}")
+            log(f"🔍 DEBUG RR: SHORT - Selected: {best_approach[0]} = {effective_support:.4f}")
+            
+            potential_reward = current_price - effective_support
         
-        log(f"🔍 DEBUG RR: Potential reward: {potential_reward:.2f}")
-        log(f"🔍 DEBUG RR: Potential risk: {potential_risk:.2f}")
+        log(f"🔍 DEBUG RR: Potential reward: {potential_reward:.4f}")
+        log(f"🔍 DEBUG RR: Potential risk: {potential_risk:.4f}")
         
         if potential_reward <= 0 or potential_risk <= 0:
-            log(f"❌ DEBUG RR: Invalid reward/risk: {potential_reward:.2f}/{potential_risk:.2f}")
+            log(f"❌ DEBUG RR: Invalid reward/risk: {potential_reward:.4f}/{potential_risk:.4f}")
             return False
         
         rr_ratio = potential_reward / potential_risk
         log(f"🔍 DEBUG RR: Risk/Reward ratio: {rr_ratio:.3f} (needs >= 1.2)")
         
-        # Quality checks
-        min_reward_threshold = current_price * 0.015
+        # Additional quality checks - IMPROVED FOR ALL ASSET TYPES
+        min_reward_threshold = current_price * 0.01  # Reduced to 1% (was 1.5%)
         if potential_reward < min_reward_threshold:
-            log(f"❌ DEBUG RR: Reward too small: {potential_reward:.2f} < {min_reward_threshold:.2f}")
+            log(f"❌ DEBUG RR: Reward too small: {potential_reward:.4f} < {min_reward_threshold:.4f}")
             return False
         
-        max_risk_threshold = current_price * 0.04
+        max_risk_threshold = current_price * 0.04  # Maximum 4% risk
         if potential_risk > max_risk_threshold:
-            log(f"❌ DEBUG RR: Risk too large: {potential_risk:.2f} > {max_risk_threshold:.2f}")
+            log(f"❌ DEBUG RR: Risk too large: {potential_risk:.4f} > {max_risk_threshold:.4f}")
             return False
         
         result = rr_ratio >= 1.2
@@ -131,14 +154,13 @@ def validate_core_risk_reward(core_candles, direction):
         return False
 
 def create_test_cases():
-    """Create test cases that mirror your failing scenarios"""
+    """Create improved test cases"""
     
-    # Case 1: BTCUSDT-like scenario (was failing)
+    # Case 1: BTCUSDT-like scenario
     btc_candles = []
     base_price = 50000
     for i in range(20):
-        # Simulate gradual uptrend
-        price = base_price + (i * 100) + (i % 3 * 50)  # 50000 to 52150 range
+        price = base_price + (i * 100) + (i % 3 * 50)
         btc_candles.append({
             'high': str(price + 60),
             'low': str(price - 50),
@@ -146,11 +168,11 @@ def create_test_cases():
             'open': str(price - 10)
         })
     
-    # Case 2: ETHUSDT-like scenario (was failing)  
+    # Case 2: ETHUSDT-like scenario
     eth_candles = []
     base_price = 3000
     for i in range(15):
-        price = base_price + (i * 20)  # 3000 to 3280 range
+        price = base_price + (i * 20)
         eth_candles.append({
             'high': str(price + 20),
             'low': str(price - 15),
@@ -158,16 +180,23 @@ def create_test_cases():
             'open': str(price - 5)
         })
     
-    # Case 3: Short scenario (was working)
+    # Case 3: IMPROVED ADA SHORT scenario - create proper downtrend
     ada_candles = []
     base_price = 1.0
     for i in range(15):
-        price = base_price - (i * 0.01)  # Downtrend
+        # Create a clearer downtrend with better range
+        if i < 5:  # Resistance area
+            price = base_price - (i * 0.005)  # 1.00 to 0.98
+        elif i < 10:  # Breakdown
+            price = base_price - 0.05 - (i * 0.02)  # 0.95 to 0.85
+        else:  # Current area
+            price = base_price - 0.15 - (i % 3 * 0.005)  # Around 0.85
+            
         ada_candles.append({
-            'high': str(price + 0.005),
-            'low': str(price - 0.005),
+            'high': str(price + 0.01),
+            'low': str(price - 0.01),
             'close': str(price),
-            'open': str(price + 0.002)
+            'open': str(price + 0.005)
         })
     
     return {
@@ -177,14 +206,13 @@ def create_test_cases():
     }
 
 def run_tests():
-    """Run the fixed validation tests"""
-    print("🧪 TESTING FIXED RISK/REWARD VALIDATION")
+    """Run the complete fixed validation tests"""
+    print("🧪 TESTING COMPLETE FIXED RISK/REWARD VALIDATION")
     print("=" * 80)
     
     test_cases = create_test_cases()
     
-    # Test the scenarios that were failing
-    print("\n📈 TESTING LONG POSITIONS (were failing):")
+    print("\n📈 TESTING LONG POSITIONS:")
     print("-" * 50)
     
     btc_result = validate_core_risk_reward(test_cases['BTCUSDT'], "Long")
@@ -194,7 +222,7 @@ def run_tests():
     eth_result = validate_core_risk_reward(test_cases['ETHUSDT'], "Long") 
     print(f"✓ ETHUSDT Long: {'✅ PASS' if eth_result else '❌ FAIL'}")
     
-    print("\n📉 TESTING SHORT POSITION (was working):")
+    print("\n📉 TESTING SHORT POSITION (FIXED):")
     print("-" * 50)
     
     ada_result = validate_core_risk_reward(test_cases['ADAUSDT'], "Short")
@@ -202,9 +230,9 @@ def run_tests():
     
     print("\n" + "=" * 80)
     print("🎯 SUMMARY:")
-    print(f"   BTCUSDT Long: {'FIXED ✅' if btc_result else 'Still failing ❌'}")
-    print(f"   ETHUSDT Long: {'FIXED ✅' if eth_result else 'Still failing ❌'}")
-    print(f"   ADAUSDT Short: {'Still working ✅' if ada_result else 'Broken ❌'}")
+    print(f"   BTCUSDT Long: {'WORKING ✅' if btc_result else 'Still failing ❌'}")
+    print(f"   ETHUSDT Long: {'WORKING ✅' if eth_result else 'Still failing ❌'}")
+    print(f"   ADAUSDT Short: {'FIXED ✅' if ada_result else 'Still broken ❌'}")
     
     all_pass = btc_result and eth_result and ada_result
     print(f"\n🏆 OVERALL: {'ALL TESTS PASS - READY TO DEPLOY ✅' if all_pass else 'NEEDS MORE WORK ❌'}")

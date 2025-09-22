@@ -483,45 +483,99 @@ def validate_core_price_action(core_candles, direction):
         log(f"Price action validation error: {e}", level="WARN")
         return False
 
+# Replace your validate_core_risk_reward function in main.py with this debug version:
+
 def validate_core_risk_reward(core_candles, direction):
-    """Validate risk/reward setup"""
+    """Validate risk/reward setup - WITH DEBUG"""
     try:
+        log(f"🔍 DEBUG RR: validate_core_risk_reward called, direction={direction}")
+        log(f"🔍 DEBUG RR: Available timeframes: {list(core_candles.keys())}")
+        
         if '15' not in core_candles:
+            log(f"❌ DEBUG RR: No '15' timeframe in core_candles")
             return False
         
         candles = core_candles['15'][-5:]
+        log(f"🔍 DEBUG RR: Got {len(candles)} candles from 15m timeframe")
+        
         if len(candles) < 5:
+            log(f"❌ DEBUG RR: Not enough candles: {len(candles)} < 5")
             return False
         
         highs = [float(c.get('high', 0)) for c in candles]
         lows = [float(c.get('low', 0)) for c in candles]
         closes = [float(c.get('close', 0)) for c in candles]
         
+        log(f"🔍 DEBUG RR: Highs: {highs}")
+        log(f"🔍 DEBUG RR: Lows: {lows}")
+        log(f"🔍 DEBUG RR: Closes: {closes}")
+        
         current_price = closes[-1]
+        log(f"🔍 DEBUG RR: Current price: {current_price}")
         
         if direction.lower() == "long":
             # For long: check if we have clear resistance above and support below
             resistance = max(highs)
             support = min(lows)
             
+            log(f"🔍 DEBUG RR: LONG - Resistance: {resistance}, Support: {support}")
+            
             # RELAXED: Simple risk/reward check
             potential_reward = resistance - current_price
             potential_risk = current_price - support
             
-            # Risk/reward ratio should be at least 1:1.5 (was 1:2)
-            return potential_reward > 0 and potential_risk > 0 and (potential_reward / potential_risk) >= 1.2
+            log(f"🔍 DEBUG RR: Potential reward: {potential_reward}")
+            log(f"🔍 DEBUG RR: Potential risk: {potential_risk}")
+            
+            if potential_reward <= 0:
+                log(f"❌ DEBUG RR: No potential reward: {potential_reward}")
+                return False
+                
+            if potential_risk <= 0:
+                log(f"❌ DEBUG RR: No potential risk: {potential_risk}")
+                return False
+            
+            rr_ratio = potential_reward / potential_risk
+            log(f"🔍 DEBUG RR: Risk/Reward ratio: {rr_ratio:.3f} (needs >= 1.2)")
+            
+            result = rr_ratio >= 1.2
+            log(f"🔍 DEBUG RR: Risk/reward validation result: {result}")
+            
+            return result
+            
         else:
             # For short: opposite logic
             resistance = max(highs)
             support = min(lows)
             
+            log(f"🔍 DEBUG RR: SHORT - Resistance: {resistance}, Support: {support}")
+            
             potential_reward = current_price - support
             potential_risk = resistance - current_price
             
-            return potential_reward > 0 and potential_risk > 0 and (potential_reward / potential_risk) >= 1.2
+            log(f"🔍 DEBUG RR: Potential reward: {potential_reward}")
+            log(f"🔍 DEBUG RR: Potential risk: {potential_risk}")
+            
+            if potential_reward <= 0:
+                log(f"❌ DEBUG RR: No potential reward: {potential_reward}")
+                return False
+                
+            if potential_risk <= 0:
+                log(f"❌ DEBUG RR: No potential risk: {potential_risk}")
+                return False
+            
+            rr_ratio = potential_reward / potential_risk
+            log(f"🔍 DEBUG RR: Risk/Reward ratio: {rr_ratio:.3f} (needs >= 1.2)")
+            
+            result = rr_ratio >= 1.2
+            log(f"🔍 DEBUG RR: Risk/reward validation result: {result}")
+            
+            return result
         
     except Exception as e:
-        log(f"Risk/reward validation error: {e}", level="WARN")
+        log(f"❌ DEBUG RR: Risk/reward validation error: {e}", level="ERROR")
+        import traceback
+        log(f"❌ DEBUG RR: Traceback: {traceback.format_exc()}", level="ERROR")
         return False
 
 def validate_core_timing():
@@ -953,6 +1007,7 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+
 
 
 

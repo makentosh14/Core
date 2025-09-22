@@ -365,41 +365,64 @@ def determine_core_direction(core_candles, trend_context):
 async def validate_core_conditions(symbol, core_candles, direction, trend_context):
     """FIXED: Validate core strategy specific conditions with relaxed requirements"""
     try:
-        # Debug logging
         log(f"🔍 Validating core conditions for {symbol} {direction}")
         
-        # 1. Volume validation - must be above average
+        validation_score = 0
+        max_score = 5
+        
+        # 1. Volume validation (weight: 2 points)
         volume_ok = validate_core_volume(core_candles)
-        log(f"   Volume check: {'✅' if volume_ok else '❌'}")
-        if not volume_ok:
-            return False
+        if volume_ok:
+            validation_score += 2
+            log(f"   Volume check: ✅ (+2 points)")
+        else:
+            log(f"   Volume check: ❌ (0 points)")
         
-        # 2. Price action quality
+        # 2. Price action quality (weight: 1 point)
         price_action_ok = validate_core_price_action(core_candles, direction)
-        log(f"   Price action check: {'✅' if price_action_ok else '❌'}")
-        if not price_action_ok:
-            return False
+        if price_action_ok:
+            validation_score += 1
+            log(f"   Price action check: ✅ (+1 point)")
+        else:
+            log(f"   Price action check: ❌ (0 points)")
         
-        # 3. Risk/reward validation
+        # 3. Risk/reward validation (weight: 1 point) - with fallback
         risk_reward_ok = validate_core_risk_reward(core_candles, direction)
-        log(f"   Risk/reward check: {'✅' if risk_reward_ok else '❌'}")
-        if not risk_reward_ok:
-            return False
+        if risk_reward_ok:
+            validation_score += 1
+            log(f"   Risk/reward check: ✅ (+1 point)")
+        else:
+            # Fallback: Check if at least price is trending in right direction
+            if check_price_direction_alignment(core_candles, direction):
+                validation_score += 0.5
+                log(f"   Risk/reward check: ⚠️ (fallback +0.5 points)")
+            else:
+                log(f"   Risk/reward check: ❌ (0 points)")
         
-        # 4. Market timing validation
+        # 4. Market timing validation (weight: 0.5 points)
         timing_ok = validate_core_timing()
-        log(f"   Timing check: {'✅' if timing_ok else '❌'}")
-        if not timing_ok:
-            return False
+        if timing_ok:
+            validation_score += 0.5
+            log(f"   Timing check: ✅ (+0.5 points)")
+        else:
+            log(f"   Timing check: ❌ (0 points)")
         
-        # 5. Trend coherence across timeframes - FIXED
+        # 5. Trend coherence (weight: 0.5 points)
         trend_coherence_ok = validate_core_trend_coherence(core_candles, direction)
-        log(f"   Trend coherence check: {'✅' if trend_coherence_ok else '❌'}")
-        if not trend_coherence_ok:
-            return False
+        if trend_coherence_ok:
+            validation_score += 0.5
+            log(f"   Trend coherence check: ✅ (+0.5 points)")
+        else:
+            log(f"   Trend coherence check: ❌ (0 points)")
         
-        log(f"✅ All core conditions passed for {symbol}")
-        return True
+        # Pass if score >= 3.0 out of 5.0 (60% threshold)
+        passing_threshold = 3.0
+        result = validation_score >= passing_threshold
+        
+        log(f"📊 Validation score: {validation_score}/{max_score} (need {passing_threshold})")
+        log(f"🎯 Final result: {'✅ PASS' if result else '❌ FAIL'}")
+        
+        return result
         
     except Exception as e:
         log(f"❌ CORE STRATEGY: Error validating conditions for {symbol}: {e}", level="ERROR")
@@ -408,7 +431,9 @@ async def validate_core_conditions(symbol, core_candles, direction, trend_contex
 # Replace your validate_core_volume function in main.py with this debug version:
 
 def validate_core_volume(core_candles):
-    """Core strategy volume validation - stricter requirements - WITH DEBUG"""
+    """
+    Improved volume validation with better logic and thresholds
+    """
     try:
         log(f"🔍 DEBUG: validate_core_volume called with keys: {list(core_candles.keys())}")
         
@@ -418,11 +443,11 @@ def validate_core_volume(core_candles):
         
         log(f"🔍 DEBUG: Found '1' timeframe, type: {type(core_candles['1'])}")
         
-        candles = core_candles['1'][-20:]
-        log(f"🔍 DEBUG: Extracted {len(candles)} candles from last 20")
+        candles = core_candles['1'][-30:]  # Use 30 candles for better average
+        log(f"🔍 DEBUG: Extracted {len(candles)} candles from last 30")
         
-        if len(candles) == 0:
-            log(f"❌ DEBUG: No candles extracted")
+        if len(candles) < 20:
+            log(f"❌ DEBUG: Not enough candles: {len(candles)} < 20")
             return False
         
         # Debug: Show first and last candle
@@ -438,15 +463,29 @@ def validate_core_volume(core_candles):
             log(f"❌ DEBUG: Not enough volumes: {len(volumes)} < 20")
             return False
         
-        avg_volume = sum(volumes) / len(volumes)
-        recent_volume = sum(volumes[-5:]) / 5  # Last 5 candles average
-        ratio = recent_volume / avg_volume if avg_volume > 0 else 0
+        # Improved volume analysis
+        # Use median instead of mean to avoid skew from outliers
+        sorted_volumes = sorted(volumes[:-5])  # Exclude recent 5 candles
+        median_volume = sorted_volumes[len(sorted_volumes)//2] if sorted_volumes else 0
+        avg_volume = sum(volumes[:-5]) / len(volumes[:-5]) if len(volumes) > 5 else 0
         
-        log(f"🔍 DEBUG: Average volume: {avg_volume}")
-        log(f"🔍 DEBUG: Recent volume: {recent_volume}")
-        log(f"🔍 DEBUG: Ratio: {ratio:.3f} (needs > 1.2)")
+        # Use average of last 3 candles instead of 5 to be more sensitive
+        recent_volume = sum(volumes[-3:]) / 3
         
-        result = recent_volume > avg_volume * 1.2
+        # Calculate both ratios
+        avg_ratio = recent_volume / avg_volume if avg_volume > 0 else 0
+        median_ratio = recent_volume / median_volume if median_volume > 0 else 0
+        
+        log(f"🔍 DEBUG: Average volume (excluding recent): {avg_volume}")
+        log(f"🔍 DEBUG: Median volume (excluding recent): {median_volume}")
+        log(f"🔍 DEBUG: Recent volume (last 3): {recent_volume}")
+        log(f"🔍 DEBUG: Avg ratio: {avg_ratio:.3f} (needs > 1.5)")
+        log(f"🔍 DEBUG: Median ratio: {median_ratio:.3f} (needs > 1.5)")
+        
+        # More lenient volume requirement - either ratio needs to be good
+        volume_threshold = 1.5  # Relaxed from 2.0
+        result = avg_ratio > volume_threshold or median_ratio > volume_threshold
+        
         log(f"🔍 DEBUG: Volume validation result: {result}")
         
         return result
@@ -486,7 +525,10 @@ def validate_core_price_action(core_candles, direction):
 # Replace your validate_core_risk_reward function in main.py with this debug version:
 
 def validate_core_risk_reward(core_candles, direction):
-    """Validate risk/reward setup - WITH DEBUG"""
+    """
+    Fixed risk/reward validation with proper support/resistance calculation
+    Uses wider lookback period and better level identification
+    """
     try:
         log(f"🔍 DEBUG RR: validate_core_risk_reward called, direction={direction}")
         log(f"🔍 DEBUG RR: Available timeframes: {list(core_candles.keys())}")
@@ -495,44 +537,60 @@ def validate_core_risk_reward(core_candles, direction):
             log(f"❌ DEBUG RR: No '15' timeframe in core_candles")
             return False
         
-        candles = core_candles['15'][-5:]
+        # Use more candles for better S/R identification
+        candles = core_candles['15'][-20:]  # Increased from 5 to 20
         log(f"🔍 DEBUG RR: Got {len(candles)} candles from 15m timeframe")
         
-        if len(candles) < 5:
-            log(f"❌ DEBUG RR: Not enough candles: {len(candles)} < 5")
+        if len(candles) < 10:
+            log(f"❌ DEBUG RR: Not enough candles: {len(candles)} < 10")
             return False
         
         highs = [float(c.get('high', 0)) for c in candles]
         lows = [float(c.get('low', 0)) for c in candles]
         closes = [float(c.get('close', 0)) for c in candles]
         
-        log(f"🔍 DEBUG RR: Highs: {highs}")
-        log(f"🔍 DEBUG RR: Lows: {lows}")
-        log(f"🔍 DEBUG RR: Closes: {closes}")
-        
         current_price = closes[-1]
         log(f"🔍 DEBUG RR: Current price: {current_price}")
         
+        # Better support/resistance calculation
+        resistance_levels = []
+        support_levels = []
+        
+        # Find local highs and lows for S/R levels
+        for i in range(2, len(candles) - 2):
+            # Local high (resistance)
+            if (highs[i] > highs[i-1] and highs[i] > highs[i-2] and 
+                highs[i] > highs[i+1] and highs[i] > highs[i+2]):
+                resistance_levels.append(highs[i])
+            
+            # Local low (support)  
+            if (lows[i] < lows[i-1] and lows[i] < lows[i-2] and 
+                lows[i] < lows[i+1] and lows[i] < lows[i+2]):
+                support_levels.append(lows[i])
+        
+        # If no clear S/R levels found, use simple min/max with buffer
+        if not resistance_levels:
+            resistance_levels = [max(highs)]
+        if not support_levels:
+            support_levels = [min(lows)]
+        
         if direction.lower() == "long":
-            # For long: check if we have clear resistance above and support below
-            resistance = max(highs)
-            support = min(lows)
+            # For long: find nearest resistance above and support below
+            nearby_resistance = min([r for r in resistance_levels if r > current_price], 
+                                  default=current_price * 1.02)  # 2% above if none found
+            nearby_support = max([s for s in support_levels if s < current_price], 
+                               default=current_price * 0.98)  # 2% below if none found
             
-            log(f"🔍 DEBUG RR: LONG - Resistance: {resistance}, Support: {support}")
+            log(f"🔍 DEBUG RR: LONG - Resistance: {nearby_resistance}, Support: {nearby_support}")
             
-            # RELAXED: Simple risk/reward check
-            potential_reward = resistance - current_price
-            potential_risk = current_price - support
+            potential_reward = nearby_resistance - current_price
+            potential_risk = current_price - nearby_support
             
             log(f"🔍 DEBUG RR: Potential reward: {potential_reward}")
             log(f"🔍 DEBUG RR: Potential risk: {potential_risk}")
             
-            if potential_reward <= 0:
-                log(f"❌ DEBUG RR: No potential reward: {potential_reward}")
-                return False
-                
-            if potential_risk <= 0:
-                log(f"❌ DEBUG RR: No potential risk: {potential_risk}")
+            if potential_reward <= 0 or potential_risk <= 0:
+                log(f"❌ DEBUG RR: Invalid reward/risk: {potential_reward}/{potential_risk}")
                 return False
             
             rr_ratio = potential_reward / potential_risk
@@ -543,25 +601,23 @@ def validate_core_risk_reward(core_candles, direction):
             
             return result
             
-        else:
-            # For short: opposite logic
-            resistance = max(highs)
-            support = min(lows)
+        else:  # SHORT
+            # For short: find nearest support below and resistance above
+            nearby_resistance = min([r for r in resistance_levels if r > current_price], 
+                                  default=current_price * 1.02)
+            nearby_support = max([s for s in support_levels if s < current_price], 
+                               default=current_price * 0.98)
             
-            log(f"🔍 DEBUG RR: SHORT - Resistance: {resistance}, Support: {support}")
+            log(f"🔍 DEBUG RR: SHORT - Resistance: {nearby_resistance}, Support: {nearby_support}")
             
-            potential_reward = current_price - support
-            potential_risk = resistance - current_price
+            potential_reward = current_price - nearby_support
+            potential_risk = nearby_resistance - current_price
             
             log(f"🔍 DEBUG RR: Potential reward: {potential_reward}")
             log(f"🔍 DEBUG RR: Potential risk: {potential_risk}")
             
-            if potential_reward <= 0:
-                log(f"❌ DEBUG RR: No potential reward: {potential_reward}")
-                return False
-                
-            if potential_risk <= 0:
-                log(f"❌ DEBUG RR: No potential risk: {potential_risk}")
+            if potential_reward <= 0 or potential_risk <= 0:
+                log(f"❌ DEBUG RR: Invalid reward/risk: {potential_reward}/{potential_risk}")
                 return False
             
             rr_ratio = potential_reward / potential_risk
@@ -1007,6 +1063,7 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+
 
 
 

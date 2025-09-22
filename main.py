@@ -526,7 +526,8 @@ def validate_core_price_action(core_candles, direction):
 
 def validate_core_risk_reward(core_candles, direction):
     """
-    FIXED: Improved risk/reward validation with better target calculation
+    COMPLETE FIXED VERSION: Risk/reward validation with proper target calculation
+    Addresses the core issue where LONG positions have targets too close to current price
     """
     try:
         log(f"🔍 DEBUG RR: validate_core_risk_reward called, direction={direction}")
@@ -550,101 +551,109 @@ def validate_core_risk_reward(core_candles, direction):
         current_price = closes[-1]
         log(f"🔍 DEBUG RR: Current price: {current_price}")
         
-        # Better support/resistance calculation using pivot points
-        resistance_levels = []
-        support_levels = []
-        
-        # Find pivot highs and lows (3-period pivot)
-        for i in range(2, len(candles) - 2):
-            # Pivot high (resistance)
-            if (highs[i] >= highs[i-1] and highs[i] >= highs[i-2] and 
-                highs[i] >= highs[i+1] and highs[i] >= highs[i+2]):
-                resistance_levels.append(highs[i])
-            
-            # Pivot low (support)  
-            if (lows[i] <= lows[i-1] and lows[i] <= lows[i-2] and 
-                lows[i] <= lows[i+1] and lows[i] <= lows[i+2]):
-                support_levels.append(lows[i])
-        
-        # Add recent highs/lows as potential levels
-        recent_high = max(highs[-5:])  # Last 5 candles
-        recent_low = min(lows[-5:])    # Last 5 candles
-        
-        if recent_high not in resistance_levels:
-            resistance_levels.append(recent_high)
-        if recent_low not in support_levels:
-            support_levels.append(recent_low)
-        
-        # Remove duplicate levels (within 0.1% of each other)
-        resistance_levels = remove_duplicate_levels(resistance_levels, current_price * 0.001)
-        support_levels = remove_duplicate_levels(support_levels, current_price * 0.001)
-        
         if direction.lower() == "long":
-            # For LONG positions: find meaningful resistance above current price
-            valid_resistance = [r for r in resistance_levels if r > current_price * 1.001]  # At least 0.1% above
+            # FIXED APPROACH FOR LONG POSITIONS
             
-            if valid_resistance:
-                nearby_resistance = min(valid_resistance)
-            else:
-                # If no clear resistance, use recent range expansion
-                price_range = max(highs) - min(lows)
-                nearby_resistance = current_price + (price_range * 0.3)  # 30% of recent range
+            # 1. Find proper support level
+            recent_lows = lows[-10:]  # Last 10 candles
+            support_candidate = min(recent_lows)
             
-            # Find support below current price
-            valid_support = [s for s in support_levels if s < current_price * 0.999]  # At least 0.1% below
+            # Cap maximum risk at 3% for safety
+            max_risk_percent = 0.03
+            min_support_level = current_price * (1 - max_risk_percent)
+            effective_support = max(support_candidate, min_support_level)
             
-            if valid_support:
-                nearby_support = max(valid_support)
-            else:
-                # Use recent low with buffer
-                nearby_support = min(lows) * 0.98  # 2% below recent low
+            # 2. Calculate risk first
+            potential_risk = current_price - effective_support
             
-            log(f"🔍 DEBUG RR: LONG - Resistance: {nearby_resistance}, Support: {nearby_support}")
+            # 3. FIXED TARGET CALCULATION - Multiple approaches
+            approaches = []
             
-            potential_reward = nearby_resistance - current_price
-            potential_risk = current_price - nearby_support
+            # Approach A: Risk-based target (1.5x risk for 1.5 R/R ratio)
+            risk_based_target = current_price + (potential_risk * 1.5)
+            approaches.append(("risk_1.5x", risk_based_target))
             
-        else:  # SHORT
-            # For SHORT positions: find meaningful support below current price
-            valid_support = [s for s in support_levels if s < current_price * 0.999]  # At least 0.1% below
+            # Approach B: Percentage-based target (minimum 4% above current)
+            percentage_target = current_price * 1.04
+            approaches.append(("percent_4%", percentage_target))
             
-            if valid_support:
-                nearby_support = max(valid_support)
-            else:
-                # If no clear support, use recent range expansion
-                price_range = max(highs) - min(lows)
-                nearby_support = current_price - (price_range * 0.3)  # 30% of recent range
+            # Approach C: Recent resistance with buffer
+            recent_highs = highs[-10:]
+            recent_resistance = max(recent_highs)
+            if recent_resistance > current_price * 1.01:  # At least 1% above
+                buffered_resistance = recent_resistance * 1.01  # Add 1% buffer
+                approaches.append(("resistance_buffered", buffered_resistance))
             
-            # Find resistance above current price
-            valid_resistance = [r for r in resistance_levels if r > current_price * 1.001]  # At least 0.1% above
+            # Approach D: Price range expansion
+            price_range = max(highs) - min(lows)
+            range_target = current_price + (price_range * 0.3)  # 30% of range
+            approaches.append(("range_30%", range_target))
             
-            if valid_resistance:
-                nearby_resistance = min(valid_resistance)
-            else:
-                # Use recent high with buffer
-                nearby_resistance = max(highs) * 1.02  # 2% above recent high
+            # Choose the highest reasonable target
+            effective_resistance = max(target for _, target in approaches)
+            best_approach = max(approaches, key=lambda x: x[1])
             
-            log(f"🔍 DEBUG RR: SHORT - Resistance: {nearby_resistance}, Support: {nearby_support}")
+            log(f"🔍 DEBUG RR: LONG - Support: {effective_support:.2f}")
+            log(f"🔍 DEBUG RR: LONG - Target approaches: {[(name, f'{target:.2f}') for name, target in approaches]}")
+            log(f"🔍 DEBUG RR: LONG - Selected: {best_approach[0]} = {effective_resistance:.2f}")
+            
+            potential_reward = effective_resistance - current_price
+            
+        else:  # SHORT POSITIONS - Keep existing working logic
+            # Find pivot points for support/resistance
+            resistance_levels = []
+            support_levels = []
+            
+            for i in range(2, len(candles) - 2):
+                # Pivot high (resistance)
+                if (highs[i] >= highs[i-1] and highs[i] >= highs[i-2] and 
+                    highs[i] >= highs[i+1] and highs[i] >= highs[i+2]):
+                    resistance_levels.append(highs[i])
+                
+                # Pivot low (support)  
+                if (lows[i] <= lows[i-1] and lows[i] <= lows[i-2] and 
+                    lows[i] <= lows[i+1] and lows[i] <= lows[i+2]):
+                    support_levels.append(lows[i])
+            
+            # Fallback levels if no pivots found
+            if not resistance_levels:
+                resistance_levels = [max(highs)]
+            if not support_levels:
+                support_levels = [min(lows)]
+            
+            # Find nearest levels
+            nearby_resistance = min([r for r in resistance_levels if r > current_price], 
+                                  default=current_price * 1.02)
+            nearby_support = max([s for s in support_levels if s < current_price], 
+                               default=current_price * 0.98)
+            
+            log(f"🔍 DEBUG RR: SHORT - Resistance: {nearby_resistance:.2f}, Support: {nearby_support:.2f}")
             
             potential_reward = current_price - nearby_support
             potential_risk = nearby_resistance - current_price
         
-        log(f"🔍 DEBUG RR: Potential reward: {potential_reward}")
-        log(f"🔍 DEBUG RR: Potential risk: {potential_risk}")
+        log(f"🔍 DEBUG RR: Potential reward: {potential_reward:.2f}")
+        log(f"🔍 DEBUG RR: Potential risk: {potential_risk:.2f}")
         
         # Validation checks
         if potential_reward <= 0 or potential_risk <= 0:
-            log(f"❌ DEBUG RR: Invalid reward/risk: {potential_reward}/{potential_risk}")
+            log(f"❌ DEBUG RR: Invalid reward/risk: {potential_reward:.2f}/{potential_risk:.2f}")
             return False
         
-        # Cap maximum risk at 4% of current price for safety
-        max_risk = current_price * 0.04
-        if potential_risk > max_risk:
-            log(f"⚠️ DEBUG RR: Risk too high ({potential_risk} > {max_risk}), adjusting")
-            potential_risk = max_risk
-        
+        # Calculate risk/reward ratio
         rr_ratio = potential_reward / potential_risk
         log(f"🔍 DEBUG RR: Risk/Reward ratio: {rr_ratio:.3f} (needs >= 1.2)")
+        
+        # Additional quality checks
+        min_reward_threshold = current_price * 0.015  # Minimum 1.5% reward
+        if potential_reward < min_reward_threshold:
+            log(f"❌ DEBUG RR: Reward too small: {potential_reward:.2f} < {min_reward_threshold:.2f}")
+            return False
+        
+        max_risk_threshold = current_price * 0.04  # Maximum 4% risk
+        if potential_risk > max_risk_threshold:
+            log(f"❌ DEBUG RR: Risk too large: {potential_risk:.2f} > {max_risk_threshold:.2f}")
+            return False
         
         result = rr_ratio >= 1.2
         log(f"🔍 DEBUG RR: Risk/reward validation result: {result}")
@@ -656,6 +665,51 @@ def validate_core_risk_reward(core_candles, direction):
         import traceback
         log(f"❌ DEBUG RR: Traceback: {traceback.format_exc()}", level="ERROR")
         return False
+
+
+# ADDITIONAL HELPER FUNCTION
+def debug_risk_reward_calculation(core_candles, direction, symbol="TEST"):
+    """
+    Debug helper to visualize what's happening in risk/reward calculation
+    """
+    print(f"\n🔬 DEBUGGING RISK/REWARD FOR {symbol} {direction}")
+    print("=" * 60)
+    
+    if '15' not in core_candles:
+        print("❌ No 15m timeframe data")
+        return
+    
+    candles = core_candles['15'][-20:]
+    highs = [float(c.get('high', 0)) for c in candles]
+    lows = [float(c.get('low', 0)) for c in candles]
+    closes = [float(c.get('close', 0)) for c in candles]
+    current_price = closes[-1]
+    
+    print(f"📊 Current Price: {current_price:.2f}")
+    print(f"📊 Recent Range: {min(lows):.2f} - {max(highs):.2f}")
+    print(f"📊 Range Size: {max(highs) - min(lows):.2f} ({((max(highs) - min(lows))/current_price*100):.1f}%)")
+    
+    if direction.lower() == "long":
+        recent_lows = lows[-10:]
+        recent_highs = highs[-10:]
+        support = min(recent_lows)
+        resistance = max(recent_highs)
+        
+        print(f"\n🎯 LONG Analysis:")
+        print(f"   Recent Support: {support:.2f} ({((support-current_price)/current_price*100):+.1f}%)")
+        print(f"   Recent Resistance: {resistance:.2f} ({((resistance-current_price)/current_price*100):+.1f}%)")
+        print(f"   Current vs Support: {current_price - support:.2f} risk")
+        print(f"   Current vs Resistance: {resistance - current_price:.2f} reward")
+        
+        if resistance > current_price:
+            basic_rr = (resistance - current_price) / (current_price - support)
+            print(f"   Basic R/R Ratio: {basic_rr:.3f}")
+        
+    # Run the actual validation
+    result = validate_core_risk_reward(core_candles, direction)
+    print(f"\n✅ Final Result: {'PASS' if result else 'FAIL'}")
+    
+    return result
 
 def remove_duplicate_levels(levels, threshold):
     """Remove levels that are too close to each other"""
@@ -1100,6 +1154,7 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+
 
 
 

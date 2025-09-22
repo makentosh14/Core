@@ -129,7 +129,8 @@ def safe_get_candles(live_candles, symbol):
         print(f"❌ Safe candle extraction error for {symbol}: {e}")
         return None
 
-async def core_strategy_scan(symbols, trend_context):    source = fix_live_candles_structure(live_candles)
+async def core_strategy_scan(symbols, trend_context): 
+    source = fix_live_candles_structure(live_candles)
 
     """
     PURE CORE STRATEGY - Single focused trading approach
@@ -1194,6 +1195,7 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+
 
 
 

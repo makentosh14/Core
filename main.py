@@ -129,7 +129,8 @@ def safe_get_candles(live_candles, symbol):
         print(f"❌ Safe candle extraction error for {symbol}: {e}")
         return None
 
-async def core_strategy_scan(symbols, trend_context):
+async def core_strategy_scan(symbols, trend_context):    source = fix_live_candles_structure(live_candles)
+
     """
     PURE CORE STRATEGY - Single focused trading approach
     Only the most reliable signals with strict quality filters
@@ -175,7 +176,7 @@ async def core_strategy_scan(symbols, trend_context):
                     min_needed = {'1': 30, '5': 30, '15': 8}
                     if tf in source.get(symbol, {}):
                         candles = list(source[symbol][tf])
-                        if candles and len(candles) >= min_needed[tf]:  # Require more history for quality
+                        if candles and len(candles) >= 30:  # Require more history for quality
                             core_candles[tf] = candles
                 
                 if len(core_candles) < 3:  # Must have all 3 timeframes
@@ -248,7 +249,6 @@ async def core_strategy_scan(symbols, trend_context):
 
 async def filter_core_symbols(symbols):
     """Simple filter - focus on basic criteria only"""
-    source = fix_live_candles_structure(live_candles)
     log(f"✅ Fixed live_candles structure before filtering")
     
     filtered = []
@@ -1150,12 +1150,13 @@ async def bybit_sync_loop(interval_sec: int = 120):
 
 
 def debug_live_link():
+    """Prints IDs of live_candles in main and websocket module + a few counts."""
     try:
         from websocket_candles import live_candles as ws_live
     except Exception:
         ws_live = None
     try:
-        log(f"🔗 live_candles id(main)={id(live_candles)} | id(ws)={id(ws_live) if ws_live else 'N/A'}")
+        log(f"🔗 live_candles id(main)={{id(live_candles)}} | id(ws)={{id(ws_live) if ws_live else 'N/A'}}")
     except Exception:
         pass
     if ws_live:
@@ -1165,7 +1166,7 @@ def debug_live_link():
                 c1 = len(tfs.get('1', []))
                 c5 = len(tfs.get('5', []))
                 c15 = len(tfs.get('15', []))
-                log(f"📊 {sym}: 1m={c1}, 5m={c5}, 15m={c15}")
+                log(f"📊 {sym}: 1m={{c1}}, 5m={{c5}}, 15m={{c15}}")
             except Exception:
                 continue
             shown += 1
@@ -1193,7 +1194,6 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
-
 
 
 

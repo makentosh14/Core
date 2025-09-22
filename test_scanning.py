@@ -5,6 +5,107 @@ import sys
 import traceback
 from collections import defaultdict, deque
 
+def create_mock_live_candles_with_volume_spike():
+    """Create realistic mock live_candles data with GUARANTEED volume spike"""
+    from collections import defaultdict
+    import random
+    
+    mock_candles = defaultdict(lambda: defaultdict(list))
+    
+    # Create mock candle data for several symbols
+    test_symbols = ["BTCUSDT", "ETHUSDT", "ADAUSDT", "DOGEUSDT", "SOLUSDT"]
+    
+    for symbol in test_symbols:
+        # Set base parameters for each symbol
+        if 'BTC' in symbol:
+            base_price = 50000
+            base_volume = 1000000  # 1M base volume
+        elif 'ETH' in symbol:
+            base_price = 3000
+            base_volume = 800000   # 800K base volume
+        else:
+            base_price = 1.0
+            base_volume = 500000   # 500K base volume
+        
+        for tf in ['1', '5', '15']:
+            # Create 50 realistic candles
+            candles = []
+            current_price = base_price
+            
+            for i in range(50):
+                # Create realistic price movements
+                price_change_pct = random.uniform(-0.01, 0.01)  # +/- 1%
+                current_price *= (1 + price_change_pct)
+                
+                # Create OHLC
+                open_price = current_price * random.uniform(0.999, 1.001)
+                close_price = current_price * random.uniform(0.999, 1.001)
+                high_price = max(open_price, close_price) * random.uniform(1.001, 1.003)
+                low_price = min(open_price, close_price) * random.uniform(0.997, 0.999)
+                
+                # CRITICAL: Create guaranteed volume pattern
+                if i < 30:  # First 30 candles - LOW volume
+                    volume = base_volume * random.uniform(0.5, 0.8)  # 50-80% of base
+                elif i < 45:  # Next 15 candles - MEDIUM volume
+                    volume = base_volume * random.uniform(0.8, 1.2)  # 80-120% of base
+                else:  # Last 5 candles - HIGH volume (GUARANTEED 2x+ spike)
+                    volume = base_volume * random.uniform(2.5, 4.0)  # 250-400% of base
+                
+                candle = {
+                    'timestamp': 1700000000000 + i * 60000,
+                    'open': str(round(open_price, 2)),
+                    'high': str(round(high_price, 2)),
+                    'low': str(round(low_price, 2)),
+                    'close': str(round(close_price, 2)),
+                    'volume': str(int(volume))
+                }
+                candles.append(candle)
+            
+            # VERIFY the volume pattern will pass validation
+            last_20_volumes = [float(c['volume']) for c in candles[-20:]]
+            avg_volume = sum(last_20_volumes) / len(last_20_volumes)
+            recent_volume = sum(last_20_volumes[-5:]) / 5
+            ratio = recent_volume / avg_volume if avg_volume > 0 else 0
+            
+            # Ensure ratio is above 1.2
+            if ratio < 1.3:  # Add buffer above 1.2 requirement
+                print(f"WARNING: {symbol} {tf} ratio only {ratio:.2f}, boosting...")
+                # Boost last 5 candles even more
+                for j in range(len(candles) - 5, len(candles)):
+                    old_vol = float(candles[j]['volume'])
+                    new_vol = old_vol * 2.0  # Double it
+                    candles[j]['volume'] = str(int(new_vol))
+                
+                # Re-verify
+                last_20_volumes = [float(c['volume']) for c in candles[-20:]]
+                avg_volume = sum(last_20_volumes) / len(last_20_volumes)
+                recent_volume = sum(last_20_volumes[-5:]) / 5
+                ratio = recent_volume / avg_volume if avg_volume > 0 else 0
+                print(f"After boost: {symbol} {tf} ratio = {ratio:.2f}")
+            
+            # Store as list to match your fixed structure
+            mock_candles[symbol][tf] = candles
+    
+    return dict(mock_candles)
+
+def verify_volume_patterns(live_candles):
+    """Verify that all symbols have proper volume patterns"""
+    print("\n=== VERIFYING VOLUME PATTERNS ===")
+    
+    for symbol in live_candles:
+        for tf in live_candles[symbol]:
+            candles = live_candles[symbol][tf]
+            if len(candles) >= 20:
+                last_20_volumes = [float(c['volume']) for c in candles[-20:]]
+                avg_volume = sum(last_20_volumes) / len(last_20_volumes)
+                recent_volume = sum(last_20_volumes[-5:]) / 5
+                ratio = recent_volume / avg_volume if avg_volume > 0 else 0
+                
+                status = "✅ PASS" if ratio > 1.2 else "❌ FAIL"
+                print(f"{symbol} {tf}: avg={avg_volume:.0f}, recent={recent_volume:.0f}, ratio={ratio:.2f} {status}")
+    
+    print("=" * 50)
+
 def fix_test_volumes(live_candles):
     """Boost volumes in existing test data to pass validation"""
     import random
@@ -154,8 +255,8 @@ async def test_filtering():
         
         # Set up mock data
         global live_candles
-        live_candles = create_mock_live_candles()
-        live_candles = fix_test_volumes_aggressive(live_candles)
+        live_candles = create_mock_live_candles_with_volume_spike()
+        verify_volume_patterns(live_candles)
         
         # Test symbols
         test_symbols = ["BTCUSDT", "ETHUSDT", "ADAUSDT", "DOGEUSDT", "SOLUSDT", "INVALID", "NOUSDT"]
@@ -187,8 +288,8 @@ async def test_scoring():
         
         # Test with mock candles
         symbol = "BTCUSDT"
-        live_candles = create_mock_live_candles()
-        live_candles = fix_test_volumes_aggressive(live_candles)
+        live_candles = create_mock_live_candles_with_volume_spike()
+        verify_volume_patterns(live_candles)
         
         candles_by_tf = {
             '1': live_candles[symbol]['1'],
@@ -230,8 +331,8 @@ async def test_core_conditions():
         )
         
         symbol = "BTCUSDT"
-        live_candles = create_mock_live_candles()
-        live_candles = fix_test_volumes_aggressive(live_candles)
+        live_candles = create_mock_live_candles_with_volume_spike()
+        verify_volume_patterns(live_candles)
         
         core_candles = {
             '1': live_candles[symbol]['1'],
@@ -352,8 +453,8 @@ async def test_individual_symbol():
         )
         
         # Set up data
-        live_candles = create_mock_live_candles()
-        live_candles = fix_test_volumes_aggressive(live_candles)
+        live_candles = create_mock_live_candles_with_volume_spike()
+        verify_volume_patterns(live_candles)
         
         trend_context = {
             "trend": "neutral", 

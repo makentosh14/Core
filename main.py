@@ -537,8 +537,7 @@ def validate_core_risk_reward(core_candles, direction):
             log(f"❌ DEBUG RR: No '15' timeframe in core_candles")
             return False
         
-        # Use more candles for better S/R identification
-        candles = core_candles['15'][-20:]  # Increased from 5 to 20
+        candles = core_candles['15'][-20:]
         log(f"🔍 DEBUG RR: Got {len(candles)} candles from 15m timeframe")
         
         if len(candles) < 10:
@@ -552,39 +551,35 @@ def validate_core_risk_reward(core_candles, direction):
         current_price = closes[-1]
         log(f"🔍 DEBUG RR: Current price: {current_price}")
         
-        # Better support/resistance calculation
-        resistance_levels = []
-        support_levels = []
-        
-        # Find local highs and lows for S/R levels
-        for i in range(2, len(candles) - 2):
-            # Local high (resistance)
-            if (highs[i] > highs[i-1] and highs[i] > highs[i-2] and 
-                highs[i] > highs[i+1] and highs[i] > highs[i+2]):
-                resistance_levels.append(highs[i])
-            
-            # Local low (support)  
-            if (lows[i] < lows[i-1] and lows[i] < lows[i-2] and 
-                lows[i] < lows[i+1] and lows[i] < lows[i+2]):
-                support_levels.append(lows[i])
-        
-        # If no clear S/R levels found, use simple min/max with buffer
-        if not resistance_levels:
-            resistance_levels = [max(highs)]
-        if not support_levels:
-            support_levels = [min(lows)]
-        
         if direction.lower() == "long":
-            # For long: find nearest resistance above and support below
-            nearby_resistance = min([r for r in resistance_levels if r > current_price], 
-                                  default=current_price * 1.02)  # 2% above if none found
-            nearby_support = max([s for s in support_levels if s < current_price], 
-                               default=current_price * 0.98)  # 2% below if none found
+            # FIXED: Better logic for LONG positions
             
-            log(f"🔍 DEBUG RR: LONG - Resistance: {nearby_resistance}, Support: {nearby_support}")
+            # Find recent support levels (focus on last 10 candles)
+            recent_lows = lows[-10:]
+            recent_highs = highs[-10:]
             
-            potential_reward = nearby_resistance - current_price
-            potential_risk = current_price - nearby_support
+            # Use recent swing low as support, not historical minimum
+            recent_support = min(recent_lows)
+            
+            # For resistance, look for recent highs or use a reasonable target
+            recent_resistance = max(recent_highs)
+            
+            # CRITICAL FIX: Ensure support is not too far from current price
+            max_risk_percent = 0.05  # Maximum 5% risk
+            min_support = current_price * (1 - max_risk_percent)
+            
+            # Use the higher of: recent support OR minimum acceptable support
+            effective_support = max(recent_support, min_support)
+            
+            # For resistance, ensure reasonable target (at least 2% above current)
+            min_resistance = current_price * 1.02
+            effective_resistance = max(recent_resistance, min_resistance)
+            
+            log(f"🔍 DEBUG RR: LONG - Raw Support: {recent_support}, Effective Support: {effective_support}")
+            log(f"🔍 DEBUG RR: LONG - Raw Resistance: {recent_resistance}, Effective Resistance: {effective_resistance}")
+            
+            potential_reward = effective_resistance - current_price
+            potential_risk = current_price - effective_support
             
             log(f"🔍 DEBUG RR: Potential reward: {potential_reward}")
             log(f"🔍 DEBUG RR: Potential risk: {potential_risk}")
@@ -602,7 +597,25 @@ def validate_core_risk_reward(core_candles, direction):
             return result
             
         else:  # SHORT
-            # For short: find nearest support below and resistance above
+            # For shorts, the original logic works better
+            resistance_levels = []
+            support_levels = []
+            
+            # Find local highs and lows
+            for i in range(2, len(candles) - 2):
+                if (highs[i] > highs[i-1] and highs[i] > highs[i-2] and 
+                    highs[i] > highs[i+1] and highs[i] > highs[i+2]):
+                    resistance_levels.append(highs[i])
+                
+                if (lows[i] < lows[i-1] and lows[i] < lows[i-2] and 
+                    lows[i] < lows[i+1] and lows[i] < lows[i+2]):
+                    support_levels.append(lows[i])
+            
+            if not resistance_levels:
+                resistance_levels = [max(highs)]
+            if not support_levels:
+                support_levels = [min(lows)]
+            
             nearby_resistance = min([r for r in resistance_levels if r > current_price], 
                                   default=current_price * 1.02)
             nearby_support = max([s for s in support_levels if s < current_price], 
@@ -1063,6 +1076,7 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+
 
 
 

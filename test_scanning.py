@@ -73,7 +73,6 @@ async def test_filtering():
         
         # Set up mock data
         global live_candles
-        live_candles = create_mock_live_candles()
         live_candles = fix_test_volumes(live_candles)
         
         # Test symbols
@@ -106,7 +105,6 @@ async def test_scoring():
         
         # Test with mock candles
         symbol = "BTCUSDT"
-        live_candles = create_mock_live_candles()
         live_candles = fix_test_volumes(live_candles)
         
         candles_by_tf = {
@@ -149,7 +147,6 @@ async def test_core_conditions():
         )
         
         symbol = "BTCUSDT"
-        live_candles = create_mock_live_candles()
         live_candles = fix_test_volumes(live_candles)
         
         core_candles = {
@@ -271,7 +268,6 @@ async def test_individual_symbol():
         )
         
         # Set up data
-        live_candles = create_mock_live_candles()
         live_candles = fix_live_candles_structure(live_candles)
         
         trend_context = {

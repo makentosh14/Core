@@ -172,9 +172,10 @@ async def core_strategy_scan(symbols, trend_context):
                 # Get candles - core strategy uses 1m, 5m, 15m only
                 core_candles = {}
                 for tf in ['1', '5', '15']:
+        min_needed = {'1': 30, '5': 30, '15': 8}
                     if tf in live_candles.get(symbol, {}):
-                        candles = live_candles[symbol][tf]
-                        if candles and len(candles) >= 30:  # Require more history for quality
+                        candles = source[symbol][tf]
+                        if candles and len(candles) >= min_needed[tf]:  # Require more history for quality
                             core_candles[tf] = candles
                 
                 if len(core_candles) < 3:  # Must have all 3 timeframes
@@ -247,8 +248,7 @@ async def core_strategy_scan(symbols, trend_context):
 
 async def filter_core_symbols(symbols):
     """Simple filter - focus on basic criteria only"""
-    global live_candles
-    live_candles = fix_live_candles_structure(live_candles)
+    source = fix_live_candles_structure(live_candles)
     log(f"✅ Fixed live_candles structure before filtering")
     
     filtered = []
@@ -265,8 +265,8 @@ async def filter_core_symbols(symbols):
             # Get any available candles
             candles = None
             for tf in ['1', '5', '15']:
-                if tf in live_candles[symbol] and live_candles[symbol][tf]:
-                    tf_data = live_candles[symbol][tf]
+                if tf in source[symbol] and source[symbol][tf]:
+                    tf_data = source[symbol][tf]
                     if isinstance(tf_data, list) and len(tf_data) >= 5:
                         candles = tf_data[-20:] if len(tf_data) >= 20 else tf_data
                         break
@@ -1147,6 +1147,31 @@ async def bybit_sync_loop(interval_sec: int = 120):
         except Exception as e:
             await send_error_to_telegram(f"Core strategy sync error: {e}")
         await asyncio.sleep(interval_sec)
+
+
+def debug_live_link():
+    try:
+        from websocket_candles import live_candles as ws_live
+    except Exception:
+        ws_live = None
+    try:
+        log(f"🔗 live_candles id(main)={id(live_candles)} | id(ws)={id(ws_live) if ws_live else 'N/A'}")
+    except Exception:
+        pass
+    if ws_live:
+        shown = 0
+        for sym, tfs in ws_live.items():
+            try:
+                c1 = len(tfs.get('1', []))
+                c5 = len(tfs.get('5', []))
+                c15 = len(tfs.get('15', []))
+                log(f"📊 {sym}: 1m={c1}, 5m={c5}, 15m={c15}")
+            except Exception:
+                continue
+            shown += 1
+            if shown >= 5:
+                break
+
 
 if __name__ == "__main__":
     log("🔧 DEBUG: CORE STRATEGY main.py is running...")

@@ -212,8 +212,11 @@ def test_volume_validation_directly():
 
 # Mock the live_candles structure
 def create_mock_live_candles():
-    """Create realistic mock live_candles data"""
-    mock_candles = defaultdict(lambda: defaultdict(lambda: deque(maxlen=100)))
+    """Create realistic mock live_candles data WITH GUARANTEED VOLUME SPIKE"""
+    from collections import defaultdict
+    import random
+    
+    mock_candles = defaultdict(lambda: defaultdict(list))
     
     # Create mock candle data for several symbols
     test_symbols = ["BTCUSDT", "ETHUSDT", "ADAUSDT", "DOGEUSDT", "SOLUSDT"]
@@ -223,22 +226,31 @@ def create_mock_live_candles():
             # Create 50 realistic candles
             candles = []
             base_price = 50000 if 'BTC' in symbol else 3000 if 'ETH' in symbol else 1.0
+            base_volume = 1000000  # 1M base volume
             
             for i in range(50):
                 price_change = (i % 10 - 5) * 0.01  # Small price movements
                 current_price = base_price * (1 + price_change)
                 
+                # FIXED: Create proper volume spike pattern
+                if i < 30:  # First 30 candles - LOW volume
+                    volume = base_volume * random.uniform(0.8, 1.0)
+                elif i < 45:  # Next 15 candles - MEDIUM volume  
+                    volume = base_volume * random.uniform(1.0, 1.2)
+                else:  # Last 5 candles - HIGH VOLUME SPIKE (2x to 3x)
+                    volume = base_volume * random.uniform(2.0, 3.0)
+                
                 candle = {
-                    'timestamp': 1700000000000 + i * 60000,  # Sequential timestamps
+                    'timestamp': 1700000000000 + i * 60000,
                     'open': str(current_price * 0.999),
                     'high': str(current_price * 1.002),
                     'low': str(current_price * 0.998),
                     'close': str(current_price),
-                    'volume': str(1000000 + i * 10000)  # Decent volume
+                    'volume': str(int(volume))  # FIXED: Use volume spike pattern
                 }
                 candles.append(candle)
             
-            # Store as list (not deque) to match your fixed structure
+            # Store as list to match your fixed structure
             mock_candles[symbol][tf] = candles
     
     return dict(mock_candles)

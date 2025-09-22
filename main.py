@@ -552,31 +552,35 @@ def validate_core_risk_reward(core_candles, direction):
         log(f"🔍 DEBUG RR: Current price: {current_price}")
         
         if direction.lower() == "long":
-            # FIXED: Better logic for LONG positions
-            
-            # Find recent support levels (focus on last 10 candles)
+            # Use recent support levels (last 10 candles)
             recent_lows = lows[-10:]
             recent_highs = highs[-10:]
             
-            # Use recent swing low as support, not historical minimum
             recent_support = min(recent_lows)
-            
-            # For resistance, look for recent highs or use a reasonable target
             recent_resistance = max(recent_highs)
             
-            # CRITICAL FIX: Ensure support is not too far from current price
-            max_risk_percent = 0.05  # Maximum 5% risk
+            # Cap maximum risk at 4% of current price
+            max_risk_percent = 0.04
             min_support = current_price * (1 - max_risk_percent)
-            
-            # Use the higher of: recent support OR minimum acceptable support
             effective_support = max(recent_support, min_support)
             
-            # For resistance, ensure reasonable target (at least 2% above current)
-            min_resistance = current_price * 1.02
-            effective_resistance = max(recent_resistance, min_resistance)
+            # FINAL FIX: Be more generous with target calculation
+            # Use the better of: recent resistance OR calculated target based on risk
+            calculated_risk = current_price - effective_support
             
-            log(f"🔍 DEBUG RR: LONG - Raw Support: {recent_support}, Effective Support: {effective_support}")
-            log(f"🔍 DEBUG RR: LONG - Raw Resistance: {recent_resistance}, Effective Resistance: {effective_resistance}")
+            # Target should be at least 1.3x the risk for good R/R (gives 1.3 ratio)
+            min_target_based_on_risk = current_price + (calculated_risk * 1.3)
+            
+            # Also ensure minimum 3% target above current price
+            min_percentage_target = current_price * 1.03
+            
+            # Use the highest target for best R/R
+            effective_resistance = max(recent_resistance, min_target_based_on_risk, min_percentage_target)
+            
+            log(f"🔍 DEBUG RR: LONG - Recent Support: {recent_support}, Effective Support: {effective_support}")
+            log(f"🔍 DEBUG RR: LONG - Recent Resistance: {recent_resistance}")
+            log(f"🔍 DEBUG RR: LONG - Risk-based Target: {min_target_based_on_risk}")
+            log(f"🔍 DEBUG RR: LONG - Final Target: {effective_resistance}")
             
             potential_reward = effective_resistance - current_price
             potential_risk = current_price - effective_support
@@ -596,12 +600,10 @@ def validate_core_risk_reward(core_candles, direction):
             
             return result
             
-        else:  # SHORT
-            # For shorts, the original logic works better
+        else:  # SHORT - keep existing logic
             resistance_levels = []
             support_levels = []
             
-            # Find local highs and lows
             for i in range(2, len(candles) - 2):
                 if (highs[i] > highs[i-1] and highs[i] > highs[i-2] and 
                     highs[i] > highs[i+1] and highs[i] > highs[i+2]):
@@ -1076,6 +1078,7 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+
 
 
 

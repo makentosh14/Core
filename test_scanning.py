@@ -28,6 +28,87 @@ def fix_test_volumes(live_candles):
     
     return live_candles
 
+def fix_test_volumes_aggressive(live_candles):
+    """Aggressively boost volumes to pass 1.5x validation requirement"""
+    import random
+    
+    for symbol in live_candles:
+        for tf in live_candles[symbol]:
+            candles = live_candles[symbol][tf]
+            if isinstance(candles, list) and len(candles) >= 20:
+                
+                # Strategy: Keep first 15 candles low, make last 5 candles VERY high
+                for i in range(len(candles)):
+                    current_vol = float(candles[i].get('volume', '1000000'))
+                    
+                    if i < len(candles) - 5:
+                        # Keep earlier candles relatively low (0.5x to 1.0x of original)
+                        new_vol = current_vol * random.uniform(0.5, 1.0)
+                    else:
+                        # Make last 5 candles VERY high (3x to 5x of original)
+                        new_vol = current_vol * random.uniform(3.0, 5.0)
+                    
+                    candles[i]['volume'] = str(int(new_vol))
+                
+                # Verify the math will work
+                volumes = [float(c['volume']) for c in candles[-20:]]
+                avg_volume = sum(volumes) / len(volumes)
+                recent_volume = sum(volumes[-5:]) / 5
+                ratio = recent_volume / avg_volume if avg_volume > 0 else 0
+                
+                print(f"Debug {symbol} {tf}: avg={avg_volume:.0f}, recent={recent_volume:.0f}, ratio={ratio:.2f}")
+    
+    return live_candles
+
+def test_volume_validation_directly():
+    """Test the volume validation function directly"""
+    
+    # Import your actual function
+    try:
+        from main import validate_core_volume
+        
+        # Create test data that should definitely pass
+        test_candles = {
+            '1': []
+        }
+        
+        # Create 20 candles with specific volume pattern
+        for i in range(20):
+            if i < 15:
+                # First 15 candles: low volume (1M each)
+                volume = 1000000
+            else:
+                # Last 5 candles: high volume (5M each)
+                volume = 5000000
+            
+            candle = {
+                'volume': str(volume),
+                'close': '50000'
+            }
+            test_candles['1'].append(candle)
+        
+        # Test the validation
+        result = validate_core_volume(test_candles)
+        
+        # Calculate what it's actually checking
+        candles = test_candles['1'][-20:]
+        volumes = [float(c.get('volume', 0)) for c in candles]
+        avg_volume = sum(volumes) / len(volumes)
+        recent_volume = sum(volumes[-5:]) / 5
+        ratio = recent_volume / avg_volume if avg_volume > 0 else 0
+        
+        print(f"Direct test result: {result}")
+        print(f"Average volume: {avg_volume}")
+        print(f"Recent volume: {recent_volume}")
+        print(f"Ratio: {ratio:.2f} (needs > 1.5)")
+        print(f"Expected: recent_volume ({recent_volume}) > avg_volume * 1.5 ({avg_volume * 1.5})")
+        
+        return result
+        
+    except ImportError as e:
+        print(f"Cannot import validate_core_volume: {e}")
+        return False
+
 # Mock the live_candles structure
 def create_mock_live_candles():
     """Create realistic mock live_candles data"""
@@ -74,7 +155,7 @@ async def test_filtering():
         # Set up mock data
         global live_candles
         live_candles = create_mock_live_candles()
-        live_candles = fix_test_volumes(live_candles)
+        live_candles = fix_test_volumes_aggressive(live_candles)
         
         # Test symbols
         test_symbols = ["BTCUSDT", "ETHUSDT", "ADAUSDT", "DOGEUSDT", "SOLUSDT", "INVALID", "NOUSDT"]
@@ -107,7 +188,7 @@ async def test_scoring():
         # Test with mock candles
         symbol = "BTCUSDT"
         live_candles = create_mock_live_candles()
-        live_candles = fix_test_volumes(live_candles)
+        live_candles = fix_test_volumes_aggressive(live_candles)
         
         candles_by_tf = {
             '1': live_candles[symbol]['1'],
@@ -150,7 +231,7 @@ async def test_core_conditions():
         
         symbol = "BTCUSDT"
         live_candles = create_mock_live_candles()
-        live_candles = fix_test_volumes(live_candles)
+        live_candles = fix_test_volumes_aggressive(live_candles)
         
         core_candles = {
             '1': live_candles[symbol]['1'],
@@ -272,7 +353,7 @@ async def test_individual_symbol():
         
         # Set up data
         live_candles = create_mock_live_candles()
-        live_candles = fix_live_candles_structure(live_candles)
+        live_candles = fix_test_volumes_aggressive(live_candles)
         
         trend_context = {
             "trend": "neutral", 
@@ -397,6 +478,10 @@ async def run_all_tests():
 
 if __name__ == "__main__":
     print("Starting scanning tests...")
+
+    print("\n=== DIRECT VOLUME VALIDATION TEST ===")
+    test_volume_validation_directly()
+    
     try:
         asyncio.run(run_all_tests())
     except KeyboardInterrupt:

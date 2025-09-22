@@ -129,7 +129,7 @@ def safe_get_candles(live_candles, symbol):
         print(f"❌ Safe candle extraction error for {symbol}: {e}")
         return None
 
-async def core_strategy_scan(symbols, trend_context): 
+async def core_strategy_scan(symbols, trend_context):
     source = fix_live_candles_structure(live_candles)
 
     """
@@ -249,6 +249,8 @@ async def core_strategy_scan(symbols, trend_context):
         log(traceback.format_exc(), level="ERROR")
 
 async def filter_core_symbols(symbols):
+    source = fix_live_candles_structure(live_candles)
+
     """Simple filter - focus on basic criteria only"""
     log(f"✅ Fixed live_candles structure before filtering")
     
@@ -260,7 +262,7 @@ async def filter_core_symbols(symbols):
             if 'USDT' not in symbol:
                 continue
                 
-            if symbol not in live_candles:
+            if symbol not in source:
                 continue
             
             # Get any available candles
@@ -1195,7 +1197,6 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
-
 
 
 

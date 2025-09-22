@@ -172,9 +172,10 @@ async def core_strategy_scan(symbols, trend_context):
                 # Get candles - core strategy uses 1m, 5m, 15m only
                 core_candles = {}
                 for tf in ['1', '5', '15']:
+        min_needed = {'1': 30, '5': 30, '15': 8}
                     if tf in live_candles.get(symbol, {}):
-                        candles = live_candles[symbol][tf]
-                        if candles and len(candles) >= 30:  # Require more history for quality
+                        candles = list(source[symbol][tf])
+                        if candles and len(candles) >= min_needed[tf]:  # Require more history for quality
                             core_candles[tf] = candles
                 
                 if len(core_candles) < 3:  # Must have all 3 timeframes
@@ -1149,13 +1150,12 @@ async def bybit_sync_loop(interval_sec: int = 120):
 
 
 def debug_live_link():
-    """Prints IDs of live_candles in main and websocket module + a few counts."""
     try:
         from websocket_candles import live_candles as ws_live
     except Exception:
         ws_live = None
     try:
-        log(f"🔗 live_candles id(main)={{id(live_candles)}} | id(ws)={{id(ws_live) if ws_live else 'N/A'}}")
+        log(f"🔗 live_candles id(main)={id(live_candles)} | id(ws)={id(ws_live) if ws_live else 'N/A'}")
     except Exception:
         pass
     if ws_live:
@@ -1165,7 +1165,7 @@ def debug_live_link():
                 c1 = len(tfs.get('1', []))
                 c5 = len(tfs.get('5', []))
                 c15 = len(tfs.get('15', []))
-                log(f"📊 {sym}: 1m={{c1}}, 5m={{c5}}, 15m={{c15}}")
+                log(f"📊 {sym}: 1m={c1}, 5m={c5}, 15m={c15}")
             except Exception:
                 continue
             shown += 1

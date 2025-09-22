@@ -1,3 +1,5 @@
+from logger import log
+
 def validate_core_risk_reward(core_candles, direction):
     """
     FINAL FIX: Risk/reward validation with better target calculation for Long positions

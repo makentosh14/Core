@@ -172,7 +172,7 @@ async def core_strategy_scan(symbols, trend_context):
                 # Get candles - core strategy uses 1m, 5m, 15m only
                 core_candles = {}
                 for tf in ['1', '5', '15']:
-        min_needed = {'1': 30, '5': 30, '15': 8}
+                    min_needed = {'1': 30, '5': 30, '15': 8}
                     if tf in source.get(symbol, {}):
                         candles = list(source[symbol][tf])
                         if candles and len(candles) >= min_needed[tf]:  # Require more history for quality
@@ -1193,6 +1193,7 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+
 
 
 

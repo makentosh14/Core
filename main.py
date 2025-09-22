@@ -405,26 +405,56 @@ async def validate_core_conditions(symbol, core_candles, direction, trend_contex
         log(f"❌ CORE STRATEGY: Error validating conditions for {symbol}: {e}", level="ERROR")
         return False
 
+# Replace your validate_core_volume function in main.py with this debug version:
+
 def validate_core_volume(core_candles):
-    """Core strategy volume validation - stricter requirements"""
+    """Core strategy volume validation - stricter requirements - WITH DEBUG"""
     try:
+        log(f"🔍 DEBUG: validate_core_volume called with keys: {list(core_candles.keys())}")
+        
         if '1' not in core_candles:
+            log(f"❌ DEBUG: No '1' timeframe in core_candles")
             return False
         
+        log(f"🔍 DEBUG: Found '1' timeframe, type: {type(core_candles['1'])}")
+        
         candles = core_candles['1'][-20:]
+        log(f"🔍 DEBUG: Extracted {len(candles)} candles from last 20")
+        
+        if len(candles) == 0:
+            log(f"❌ DEBUG: No candles extracted")
+            return False
+        
+        # Debug: Show first and last candle
+        log(f"🔍 DEBUG: First candle: {candles[0] if candles else 'None'}")
+        log(f"🔍 DEBUG: Last candle: {candles[-1] if candles else 'None'}")
+        
         volumes = [float(c.get('volume', 0)) for c in candles]
+        log(f"🔍 DEBUG: Extracted {len(volumes)} volumes")
+        log(f"🔍 DEBUG: First 5 volumes: {volumes[:5]}")
+        log(f"🔍 DEBUG: Last 5 volumes: {volumes[-5:]}")
         
         if len(volumes) < 20:
+            log(f"❌ DEBUG: Not enough volumes: {len(volumes)} < 20")
             return False
         
         avg_volume = sum(volumes) / len(volumes)
         recent_volume = sum(volumes[-5:]) / 5  # Last 5 candles average
+        ratio = recent_volume / avg_volume if avg_volume > 0 else 0
         
-        # RELAXED: Recent volume must be above average (removed 1.5x requirement)
-        return recent_volume > avg_volume * 1.2
+        log(f"🔍 DEBUG: Average volume: {avg_volume}")
+        log(f"🔍 DEBUG: Recent volume: {recent_volume}")
+        log(f"🔍 DEBUG: Ratio: {ratio:.3f} (needs > 1.2)")
+        
+        result = recent_volume > avg_volume * 1.2
+        log(f"🔍 DEBUG: Volume validation result: {result}")
+        
+        return result
         
     except Exception as e:
-        log(f"Volume validation error: {e}", level="WARN")
+        log(f"❌ DEBUG: Volume validation error: {e}", level="ERROR")
+        import traceback
+        log(f"❌ DEBUG: Traceback: {traceback.format_exc()}", level="ERROR")
         return False
 
 def validate_core_price_action(core_candles, direction):
@@ -923,6 +953,7 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+
 
 
 

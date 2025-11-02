@@ -29,6 +29,8 @@ log(f"🔍 main.py - Core Strategy Only - imported active_trades id: {id(active_
 TIMEFRAMES = SUPPORTED_INTERVALS
 active_signals = {}
 recent_exits = {}
+signal_cooldown = {}  # Track cooldown timers
+SIGNAL_COOLDOWN_TIME = 3600
 EXIT_COOLDOWN = 120
 
 # Core Strategy Thresholds - Enhanced for Quality
@@ -129,9 +131,14 @@ def safe_get_candles(live_candles, symbol):
         print(f"❌ Safe candle extraction error for {symbol}: {e}")
         return None
 
+# Add this at the top of main.py with other globals
+active_signals = {}  # Track symbols with active signals
+signal_cooldown = {}  # Track cooldown timers
+SIGNAL_COOLDOWN_TIME = 3600  # 1 hour cooldown after signal
+
 async def core_strategy_scan(symbols, trend_context):
     source = fix_live_candles_structure(live_candles)
-
+    
     """
     PURE CORE STRATEGY - Single focused trading approach
     Only the most reliable signals with strict quality filters
@@ -159,22 +166,49 @@ async def core_strategy_scan(symbols, trend_context):
         # Focus on high-quality symbols only
         quality_symbols = await filter_core_symbols(symbols)
         
-        for symbol in quality_symbols:  # Limit to top 20 symbols for focus
+        for symbol in quality_symbols[:20]:  # Limit to top 20 symbols for focus
             try:
-                # Skip if already have position
+                current_time = time.time()
+                
+                # ========== DUPLICATE PREVENTION CHECKS ==========
+                
+                # Check 1: Skip if already have position
                 if symbol in active_trades and not active_trades[symbol].get("exited", False):
                     continue
+                
+                # Check 2: Skip if signal is already active/pending
+                if symbol in active_signals:
+                    signal_time = active_signals[symbol]
+                    # If signal was sent less than 60 seconds ago, skip
+                    if current_time - signal_time < 60:
+                        continue
+                    # Clean up old signals
+                    elif current_time - signal_time > 300:  # 5 minutes
+                        del active_signals[symbol]
+                
+                # Check 3: Skip if in cooldown period
+                if symbol in signal_cooldown:
+                    cooldown_time = signal_cooldown[symbol]
+                    if current_time - cooldown_time < SIGNAL_COOLDOWN_TIME:
+                        remaining = SIGNAL_COOLDOWN_TIME - (current_time - cooldown_time)
+                        if remaining > 3590:  # Only log first time
+                            log(f"⏭️ {symbol}: In cooldown for {remaining:.0f}s")
+                        continue
+                    else:
+                        # Cooldown expired, remove it
+                        del signal_cooldown[symbol]
 
-                # Skip if in recent exit cooldown
+                # Check 4: Skip if in recent exit cooldown
                 if symbol in recent_exits:
-                    time_diff = time.time() - recent_exits[symbol]
+                    time_diff = current_time - recent_exits[symbol]
                     if time_diff < EXIT_COOLDOWN:
                         continue
+
+                # ========== END DUPLICATE PREVENTION ==========
 
                 # Get candles - core strategy uses 1m, 5m, 15m only
                 core_candles = {}
                 for tf in ['1', '5', '15']:
-                    min_needed = {'1': 30, '5': 30, '15': 8}
                     if tf in source.get(symbol, {}):
                         candles = list(source[symbol][tf])
                         if candles and len(candles) >= 30:  # Require more history for quality
@@ -187,7 +221,7 @@ async def core_strategy_scan(symbols, trend_context):
 
                 # === CORE STRATEGY SIGNAL GENERATION ===
                 
-                # 1. Get full scoring data (we need this anyway)
+                # 1. Get full scoring data
                 score_result = score_symbol(symbol, core_candles, trend_context) 
                 score, tf_scores, trade_type, indicator_scores, used_indicators = score_result
 
@@ -201,34 +235,38 @@ async def core_strategy_scan(symbols, trend_context):
                 if not direction:
                     continue
 
-                # 4. Calculate confidence (now we have all required parameters)
+                # 4. Calculate confidence
                 confidence = calculate_confidence(score, tf_scores, trend_context, trade_type)
                 if confidence < 60:
                     continue
 
-                # 4. Validate core strategy conditions
+                # 5. Validate core strategy conditions
                 if not await validate_core_conditions(symbol, core_candles, direction, trend_context):
                     continue
 
-                # 5. Determine strategy type with strict requirements
+                # 6. Determine strategy type with strict requirements
                 strategy_type = determine_core_strategy_type(core_score, confidence, trend_strength)
                 if not strategy_type:
                     continue
 
-                # 6. Check strategy-specific position limits
+                # 7. Check strategy-specific position limits
                 if not check_strategy_position_limits(strategy_type):
                     continue
 
-                # 7. Final quality gate - multiple confirmations required
+                # 8. Final quality gate - multiple confirmations required
                 core_confirmations = await get_core_confirmations(symbol, core_candles, direction, trend_context)
                 if len(core_confirmations) < 2:  # Minimum 2 confirmations
                     continue
 
+                # ========== SIGNAL FOUND - MARK AS ACTIVE ==========
+                active_signals[symbol] = current_time
+                signal_cooldown[symbol] = current_time
+                
                 core_signals_found += 1
                 log(f"✅ CORE STRATEGY SIGNAL: {symbol} {direction} | Score: {core_score:.1f} | Confidence: {confidence}% | Type: {strategy_type}")
 
                 # Execute core strategy trade
-                await execute_core_trade(
+                result = await execute_core_trade(
                     symbol=symbol,
                     direction=direction,
                     strategy_type=strategy_type,
@@ -237,10 +275,28 @@ async def core_strategy_scan(symbols, trend_context):
                     confirmations=core_confirmations,
                     trend_context=trend_context
                 )
+                
+                # If trade failed, allow retry sooner
+                if not result or not result.get("success"):
+                    # Remove from active signals to allow retry
+                    if symbol in active_signals:
+                        del active_signals[symbol]
+                    # But keep a shorter cooldown to prevent spam
+                    signal_cooldown[symbol] = current_time
 
             except Exception as e:
                 log(f"❌ CORE STRATEGY: Error processing {symbol}: {e}", level="ERROR")
+                # Clean up on error
+                if symbol in active_signals:
+                    del active_signals[symbol]
                 continue
+
+        # Clean up old active signals periodically
+        current_time = time.time()
+        stale_signals = [s for s, t in active_signals.items() if current_time - t > 300]
+        for symbol in stale_signals:
+            del active_signals[symbol]
+            log(f"🧹 Cleaned up stale signal for {symbol}")
 
         log(f"📊 CORE STRATEGY SUMMARY: {scanned_count} scanned, {core_signals_found} quality signals")
 
@@ -993,6 +1049,12 @@ async def execute_core_trade(symbol, direction, strategy_type, score, confidence
         
         adjusted_risk = base_risk * confidence_multiplier * confirmations_multiplier
         adjusted_risk = max(0.01, min(adjusted_risk, 0.03))  # Clamp 1%-3%
+
+        try:
+            # Double-check we don't already have a position
+            if symbol in active_trades and not active_trades[symbol].get("exited", False):
+                log(f"🚫 {symbol}: Trade execution blocked - position already exists")
+                return {"success": False, "reason": "position_exists"}
         
         # Prepare core strategy signal data
         signal_data = {
@@ -1006,6 +1068,17 @@ async def execute_core_trade(symbol, direction, strategy_type, score, confidence
             "risk_adjusted": True,
             "core_strategy": True
         }
+
+        result = await execute_trade_if_valid(signal_data)
+        
+        # If trade was successful, keep the cooldown
+        # If trade failed, the cooldown was already shortened in core_strategy_scan
+        
+        return result
+        
+    except Exception as e:
+        log(f"❌ Error executing core trade for {symbol}: {e}", level="ERROR")
+        return {"success": False, "reason": str(e)}
         
         # Log core strategy execution
         log(f"🎯 CORE STRATEGY EXECUTION: {symbol}")
@@ -1197,6 +1270,7 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+
 
 
 

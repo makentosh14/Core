@@ -22,6 +22,7 @@ from trade_executor import calculate_dynamic_sl_tp, execute_trade_if_valid
 from symbol_info import fetch_symbol_info
 from activity_logger import write_log, log_trade_to_file
 from monitor import track_active_trade, monitor_trades, load_active_trades, check_and_restore_sl, active_trades, recover_active_trades_from_exchange, periodic_trade_sync
+from trade_lock_manager import trade_lock_manager
 
 log(f"🔍 main.py - Core Strategy Only - imported active_trades id: {id(active_trades)}")
 
@@ -138,7 +139,7 @@ SIGNAL_COOLDOWN_TIME = 3600  # 1 hour cooldown after signal
 
 async def core_strategy_scan(symbols, trend_context):
     source = fix_live_candles_structure(live_candles)
-    
+
     """
     PURE CORE STRATEGY - Single focused trading approach
     Only the most reliable signals with strict quality filters
@@ -168,135 +169,130 @@ async def core_strategy_scan(symbols, trend_context):
         
         for symbol in quality_symbols[:20]:  # Limit to top 20 symbols for focus
             try:
-                current_time = time.time()
-                
-                # ========== DUPLICATE PREVENTION CHECKS ==========
-                
-                # Check 1: Skip if already have position
-                if symbol in active_trades and not active_trades[symbol].get("exited", False):
+                # ========== USE TRADE LOCK MANAGER ==========
+                # Check if we can process this symbol
+                can_process, reason = await trade_lock_manager.can_process_symbol(symbol)
+                if not can_process:
+                    # Only log if it's not just "processing"
+                    if "processing" not in reason.lower() and "locked" not in reason.lower():
+                        log(f"⏭️ {symbol}: {reason}")
                     continue
                 
-                # Check 2: Skip if signal is already active/pending
-                if symbol in active_signals:
-                    signal_time = active_signals[symbol]
-                    # If signal was sent less than 60 seconds ago, skip
-                    if current_time - signal_time < 60:
-                        continue
-                    # Clean up old signals
-                    elif current_time - signal_time > 300:  # 5 minutes
-                        del active_signals[symbol]
+                # Try to acquire exclusive lock
+                if not await trade_lock_manager.acquire_trade_lock(symbol):
+                    continue  # Another process is handling this symbol
                 
-                # Check 3: Skip if in cooldown period
-                if symbol in signal_cooldown:
-                    cooldown_time = signal_cooldown[symbol]
-                    if current_time - cooldown_time < SIGNAL_COOLDOWN_TIME:
-                        remaining = SIGNAL_COOLDOWN_TIME - (current_time - cooldown_time)
-                        if remaining > 3590:  # Only log first time
-                            log(f"⏭️ {symbol}: In cooldown for {remaining:.0f}s")
-                        continue
-                    else:
-                        # Cooldown expired, remove it
-                        del signal_cooldown[symbol]
-
-                # Check 4: Skip if in recent exit cooldown
-                if symbol in recent_exits:
-                    time_diff = current_time - recent_exits[symbol]
-                    if time_diff < EXIT_COOLDOWN:
+                # Now wrap ALL your existing logic in a try/finally block
+                try:
+                    # Double-check: Skip if already have position (extra safety)
+                    if symbol in active_trades and not active_trades[symbol].get("exited", False):
+                        trade_lock_manager.release_trade_lock(symbol, False)
                         continue
 
-                # ========== END DUPLICATE PREVENTION ==========
+                    # Skip if in recent exit cooldown
+                    if symbol in recent_exits:
+                        time_diff = time.time() - recent_exits[symbol]
+                        if time_diff < EXIT_COOLDOWN:
+                            trade_lock_manager.release_trade_lock(symbol, False)
+                            continue
 
-                # Get candles - core strategy uses 1m, 5m, 15m only
-                core_candles = {}
-                for tf in ['1', '5', '15']:
-                    if tf in source.get(symbol, {}):
-                        candles = list(source[symbol][tf])
-                        if candles and len(candles) >= 30:  # Require more history for quality
-                            core_candles[tf] = candles
-                
-                if len(core_candles) < 3:  # Must have all 3 timeframes
-                    continue
+                    # Get candles - core strategy uses 1m, 5m, 15m only
+                    core_candles = {}
+                    for tf in ['1', '5', '15']:
+                        if tf in source.get(symbol, {}):
+                            candles = list(source[symbol][tf])
+                            if candles and len(candles) >= 30:  # Require more history for quality
+                                core_candles[tf] = candles
+                    
+                    if len(core_candles) < 3:  # Must have all 3 timeframes
+                        trade_lock_manager.release_trade_lock(symbol, False)
+                        continue
 
-                scanned_count += 1
+                    scanned_count += 1
 
-                # === CORE STRATEGY SIGNAL GENERATION ===
-                
-                # 1. Get full scoring data
-                score_result = score_symbol(symbol, core_candles, trend_context) 
-                score, tf_scores, trade_type, indicator_scores, used_indicators = score_result
+                    # === CORE STRATEGY SIGNAL GENERATION ===
+                    
+                    # 1. Get full scoring data (we need this anyway)
+                    score_result = score_symbol(symbol, core_candles, trend_context) 
+                    score, tf_scores, trade_type, indicator_scores, used_indicators = score_result
 
-                # 2. Calculate core score with momentum bonus
-                core_score = await calculate_core_score(symbol, core_candles, trend_context)
-                if core_score < MIN_SCALP_SCORE:
-                    continue
+                    # 2. Calculate core score with momentum bonus
+                    core_score = await calculate_core_score(symbol, core_candles, trend_context)
+                    if core_score < MIN_SCALP_SCORE:
+                        trade_lock_manager.release_trade_lock(symbol, False)
+                        continue
 
-                # 3. Determine direction
-                direction = determine_core_direction(core_candles, trend_context)
-                if not direction:
-                    continue
+                    # 3. Determine direction
+                    direction = determine_core_direction(core_candles, trend_context)
+                    if not direction:
+                        trade_lock_manager.release_trade_lock(symbol, False)
+                        continue
 
-                # 4. Calculate confidence
-                confidence = calculate_confidence(score, tf_scores, trend_context, trade_type)
-                if confidence < 60:
-                    continue
+                    # 4. Calculate confidence (now we have all required parameters)
+                    confidence = calculate_confidence(score, tf_scores, trend_context, trade_type)
+                    if confidence < 60:
+                        trade_lock_manager.release_trade_lock(symbol, False)
+                        continue
 
-                # 5. Validate core strategy conditions
-                if not await validate_core_conditions(symbol, core_candles, direction, trend_context):
-                    continue
+                    # 5. Validate core strategy conditions
+                    if not await validate_core_conditions(symbol, core_candles, direction, trend_context):
+                        trade_lock_manager.release_trade_lock(symbol, False)
+                        continue
 
-                # 6. Determine strategy type with strict requirements
-                strategy_type = determine_core_strategy_type(core_score, confidence, trend_strength)
-                if not strategy_type:
-                    continue
+                    # 6. Determine strategy type with strict requirements
+                    strategy_type = determine_core_strategy_type(core_score, confidence, trend_strength)
+                    if not strategy_type:
+                        trade_lock_manager.release_trade_lock(symbol, False)
+                        continue
 
-                # 7. Check strategy-specific position limits
-                if not check_strategy_position_limits(strategy_type):
-                    continue
+                    # 7. Check strategy-specific position limits
+                    if not check_strategy_position_limits(strategy_type):
+                        trade_lock_manager.release_trade_lock(symbol, False)
+                        continue
 
-                # 8. Final quality gate - multiple confirmations required
-                core_confirmations = await get_core_confirmations(symbol, core_candles, direction, trend_context)
-                if len(core_confirmations) < 2:  # Minimum 2 confirmations
-                    continue
+                    # 8. Final quality gate - multiple confirmations required
+                    core_confirmations = await get_core_confirmations(symbol, core_candles, direction, trend_context)
+                    if len(core_confirmations) < 2:  # Minimum 2 confirmations
+                        trade_lock_manager.release_trade_lock(symbol, False)
+                        continue
 
-                # ========== SIGNAL FOUND - MARK AS ACTIVE ==========
-                active_signals[symbol] = current_time
-                signal_cooldown[symbol] = current_time
-                
-                core_signals_found += 1
-                log(f"✅ CORE STRATEGY SIGNAL: {symbol} {direction} | Score: {core_score:.1f} | Confidence: {confidence}% | Type: {strategy_type}")
+                    core_signals_found += 1
+                    log(f"✅ CORE STRATEGY SIGNAL: {symbol} {direction} | Score: {core_score:.1f} | Confidence: {confidence}% | Type: {strategy_type}")
 
-                # Execute core strategy trade
-                result = await execute_core_trade(
-                    symbol=symbol,
-                    direction=direction,
-                    strategy_type=strategy_type,
-                    score=core_score,
-                    confidence=confidence,
-                    confirmations=core_confirmations,
-                    trend_context=trend_context
-                )
-                
-                # If trade failed, allow retry sooner
-                if not result or not result.get("success"):
-                    # Remove from active signals to allow retry
-                    if symbol in active_signals:
-                        del active_signals[symbol]
-                    # But keep a shorter cooldown to prevent spam
-                    signal_cooldown[symbol] = current_time
+                    # Execute core strategy trade
+                    result = await execute_core_trade(
+                        symbol=symbol,
+                        direction=direction,
+                        strategy_type=strategy_type,
+                        score=core_score,
+                        confidence=confidence,
+                        confirmations=core_confirmations,
+                        trend_context=trend_context
+                    )
+                    
+                    # Release lock based on result
+                    success = result and result.get("success", False)
+                    trade_lock_manager.release_trade_lock(symbol, success)
+
+                finally:
+                    # Safety: always try to release lock if still held
+                    lock = trade_lock_manager.get_lock(symbol)
+                    if lock.locked():
+                        try:
+                            lock.release()
+                        except:
+                            pass
 
             except Exception as e:
                 log(f"❌ CORE STRATEGY: Error processing {symbol}: {e}", level="ERROR")
-                # Clean up on error
-                if symbol in active_signals:
-                    del active_signals[symbol]
+                # Make sure to release lock on error
+                try:
+                    lock = trade_lock_manager.get_lock(symbol)
+                    if lock.locked():
+                        lock.release()
+                except:
+                    pass
                 continue
-
-        # Clean up old active signals periodically
-        current_time = time.time()
-        stale_signals = [s for s, t in active_signals.items() if current_time - t > 300]
-        for symbol in stale_signals:
-            del active_signals[symbol]
-            log(f"🧹 Cleaned up stale signal for {symbol}")
 
         log(f"📊 CORE STRATEGY SUMMARY: {scanned_count} scanned, {core_signals_found} quality signals")
 
@@ -1193,7 +1189,8 @@ async def run_core_bot():
     asyncio.create_task(monitor_btc_trend_accuracy())  # Keep trend monitoring
     asyncio.create_task(monitor_altseason_status())    # Keep altseason monitoring
     asyncio.create_task(periodic_trade_sync())         # Keep trade sync
-    asyncio.create_task(bybit_sync_loop(120))         # Keep exchange sync
+    asyncio.create_task(bybit_sync_loop(120))  # Keep exchange sync
+    asyncio.create_task(lock_manager_maintenance())
 
     await asyncio.sleep(5)
 
@@ -1214,6 +1211,18 @@ async def run_core_bot():
             await send_error_to_telegram(traceback.format_exc())
         
         await asyncio.sleep(1.0)  # Core strategy scans every 1 second for precision
+        await trade_lock_manager.sync_with_exchange()
+
+# Lock manager maintenance task
+async def lock_manager_maintenance():
+    """Periodic maintenance for lock manager"""
+    while True:
+        try:
+            await trade_lock_manager.sync_with_exchange()
+            await trade_lock_manager.cleanup_stale_locks()
+        except Exception as e:
+            log(f"❌ Lock manager maintenance error: {e}")
+        await asyncio.sleep(30)
 
 async def bybit_sync_loop(interval_sec: int = 120):
     """Simplified sync for core strategy"""
@@ -1270,6 +1279,7 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+
 
 
 

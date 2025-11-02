@@ -168,6 +168,13 @@ async def core_strategy_scan(symbols, trend_context):
         quality_symbols = await filter_core_symbols(symbols)
         
         for symbol in quality_symbols[:50]:  # Limit to top 20 symbols for focus
+            core_score = None
+            confidence = None
+            direction = None
+            tf_scores = None
+            trade_type = None
+            core_confirmations = None
+            
             try:
                 # ========== USE TRADE LOCK MANAGER ==========
                 # Check if we can process this symbol
@@ -176,12 +183,12 @@ async def core_strategy_scan(symbols, trend_context):
                     # Only log if it's not just "processing"
                     if "processing" not in reason.lower() and "locked" not in reason.lower():
                         log(f"⏭️ {symbol}: {reason}")
-                        log(f"⏭️ {symbol}: skip – confidence {confidence}<60", level="DEBUG")
+                        log(f"⏭️ {symbol}: skip – waiting for confidence (pre-check)", level="DEBUG")
                     continue
                 
                 # Try to acquire exclusive lock
                 if not await trade_lock_manager.acquire_trade_lock(symbol):
-                    log(f"⏭️ {symbol}: skip – confidence {confidence}<60", level="DEBUG")
+                    log(f"⏭️ {symbol}: skip – waiting for confidence (pre-check)", level="DEBUG")
                     continue  # Another process is handling this symbol
                 
                 # Now wrap ALL your existing logic in a try/finally block
@@ -189,7 +196,7 @@ async def core_strategy_scan(symbols, trend_context):
                     # Double-check: Skip if already have position (extra safety)
                     if symbol in active_trades and not active_trades[symbol].get("exited", False):
                         trade_lock_manager.release_trade_lock(symbol, False)
-                        log(f"⏭️ {symbol}: skip – confidence {confidence}<60", level="DEBUG")
+                        log(f"⏭️ {symbol}: skip – waiting for confidence (pre-check)", level="DEBUG")
                         continue
 
                     # Skip if in recent exit cooldown
@@ -197,7 +204,7 @@ async def core_strategy_scan(symbols, trend_context):
                         time_diff = time.time() - recent_exits[symbol]
                         if time_diff < EXIT_COOLDOWN:
                             trade_lock_manager.release_trade_lock(symbol, False)
-                            log(f"⏭️ {symbol}: skip – confidence {confidence}<60", level="DEBUG")
+                            log(f"⏭️ {symbol}: skip – waiting for confidence (pre-check)", level="DEBUG")
                             continue
 
                     # Get candles - core strategy uses 1m, 5m, 15m only
@@ -232,14 +239,14 @@ async def core_strategy_scan(symbols, trend_context):
                     core_score = await calculate_core_score(symbol, core_candles, trend_context)
                     if core_score < MIN_SCALP_SCORE:
                         trade_lock_manager.release_trade_lock(symbol, False)
-                        log(f"⏭️ {symbol}: skip – confidence {confidence}<60", level="DEBUG")
+                        log(f"⏭️ {symbol}: skip – core_score {core_score:.1f} < {MIN_SCALP_SCORE}", level="DEBUG")
                         continue
 
                     # 3. Determine direction
                     direction = determine_core_direction(core_candles, trend_context)
                     if not direction:
                         trade_lock_manager.release_trade_lock(symbol, False)
-                        log(f"⏭️ {symbol}: skip – confidence {confidence}<60", level="DEBUG")
+                        log(f"⏭️ {symbol}: skip – no direction", level="DEBUG")
                         continue
 
                     # 4. Calculate confidence (now we have all required parameters)
@@ -1291,6 +1298,7 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+
 
 
 

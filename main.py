@@ -1038,20 +1038,19 @@ async def execute_core_trade(symbol, direction, strategy_type, score, confidence
     try:
         # Calculate core strategy risk
         base_risk = CORE_RISK_PERCENTAGES.get(strategy_type.replace("Core", ""), 0.02)
-        
-        # Quality-based risk adjustment
-        confidence_multiplier = 0.8 + (confidence / 100 * 0.4)  # 0.8 to 1.2
-        confirmations_multiplier = 0.9 + (len(confirmations) * 0.05)  # 0.9 to 1.15
-        
-        adjusted_risk = base_risk * confidence_multiplier * confirmations_multiplier
-        adjusted_risk = max(0.01, min(adjusted_risk, 0.03))  # Clamp 1%-3%
 
-        try:
-            # Double-check we don't already have a position
-            if symbol in active_trades and not active_trades[symbol].get("exited", False):
-                log(f"🚫 {symbol}: Trade execution blocked - position already exists")
-                return {"success": False, "reason": "position_exists"}
-        
+        # Quality-based risk adjustment
+        confidence_multiplier = 0.8 + (confidence / 100 * 0.4)       # 0.8 .. 1.2
+        confirmations_multiplier = 0.9 + (len(confirmations) * 0.05) # 0.9 .. 1.15
+
+        adjusted_risk = base_risk * confidence_multiplier * confirmations_multiplier
+        adjusted_risk = max(0.01, min(adjusted_risk, 0.03))  # Clamp 1%–3%
+
+        # Guard: don't open if a position already exists
+        if symbol in active_trades and not active_trades[symbol].get("exited", False):
+            log(f"🚫 {symbol}: Trade execution blocked - position already exists")
+            return {"success": False, "reason": "position_exists"}
+
         # Prepare core strategy signal data
         signal_data = {
             "symbol": symbol,
@@ -1062,44 +1061,38 @@ async def execute_core_trade(symbol, direction, strategy_type, score, confidence
             "regime": "core_strategy",
             "confirmations": confirmations,
             "risk_adjusted": True,
-            "core_strategy": True
+            "core_strategy": True,
         }
 
-        result = await execute_trade_if_valid(signal_data)
-        
-        # If trade was successful, keep the cooldown
-        # If trade failed, the cooldown was already shortened in core_strategy_scan
-        
-        return result
-        
-    except Exception as e:
-        log(f"❌ Error executing core trade for {symbol}: {e}", level="ERROR")
-        return {"success": False, "reason": str(e)}
-        
         # Log core strategy execution
         log(f"🎯 CORE STRATEGY EXECUTION: {symbol}")
         log(f"   Direction: {direction} | Type: {strategy_type}")
         log(f"   Score: {score:.1f} | Confidence: {confidence}%")
-        log(f"   Confirmations: {', '.join(confirmations)}")
+        log(f"   Confirmations: {', '.join(confirmations) if confirmations else '—'}")
         log(f"   Risk: {adjusted_risk:.2%}")
-        
-        # Execute trade
+
+        # Execute trade (pass adjusted_risk)
         trade_result = await execute_trade_if_valid(signal_data, adjusted_risk)
-        
-        if trade_result:
+
+        if trade_result and trade_result.get("success"):
             # Track core strategy performance
             log_signal(symbol)
             track_signal(symbol, score)
-            
+
             # Send core strategy notification
             await send_core_strategy_notification(signal_data, trade_result)
-            
+
             log(f"✅ CORE STRATEGY: Trade executed successfully for {symbol}")
         else:
             log(f"❌ CORE STRATEGY: Trade execution failed for {symbol}")
-            
+
+        # If trade was successful, keep the cooldown.
+        # If trade failed, the cooldown was already shortened in core_strategy_scan.
+        return trade_result
+
     except Exception as e:
         log(f"❌ CORE STRATEGY: Error executing trade for {symbol}: {e}", level="ERROR")
+        return {"success": False, "reason": str(e)}
 
 async def send_core_strategy_notification(signal_data, trade_result):
     """Send core strategy specific notification"""
@@ -1279,6 +1272,7 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+
 
 
 

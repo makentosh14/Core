@@ -570,6 +570,7 @@ async def update_stop_loss_order(symbol, order_id, new_sl_price, market_type="li
         return {"retCode": -1, "retMsg": f"Error updating stop loss: {str(e)}"}
 
 # === POSITIONS ===
+# === POSITIONS ===
 async def get_positions(symbol: str | None = None, market_type: str = "linear"):
     """
     Fetch open positions from Bybit V5.
@@ -582,7 +583,10 @@ async def get_positions(symbol: str | None = None, market_type: str = "linear"):
         List[dict]: [{"symbol": str, "side": "Buy"/"Sell", "size": float, "entryPrice": float, ...}, ...]
     """
     try:
-        params = {"category": market_type}
+        params = {
+            "category": market_type,
+            "settleCoin": "USDT",  # Required for linear USDT positions
+        }
         if symbol:
             params["symbol"] = symbol
 
@@ -592,7 +596,6 @@ async def get_positions(symbol: str | None = None, market_type: str = "linear"):
             items = (resp.get("result", {}) or {}).get("list", []) or []
             positions = []
             for p in items:
-                # size field name can vary; fall back safely
                 size = float(p.get("size") or p.get("qty") or 0)
                 positions.append({
                     "symbol": p.get("symbol"),
@@ -612,6 +615,7 @@ async def get_positions(symbol: str | None = None, market_type: str = "linear"):
         return []
 
 
+
 async def get_wallet_balance(force_refresh=False):
     """Get wallet balance - redirects to optimized version"""
     return await get_futures_available_balance(force_refresh, "get_wallet_balance")
@@ -620,4 +624,5 @@ async def signed_request_with_balance_optimization(method, endpoint, params):
     """Wrapper that automatically suppresses logs for balance calls"""
     suppress_logs = "/v5/account/wallet-balance" in endpoint
     return await signed_request(method, endpoint, params, suppress_logs)
+
 

@@ -569,6 +569,49 @@ async def update_stop_loss_order(symbol, order_id, new_sl_price, market_type="li
         log(f"❌ Error updating stop loss order: {e}", level="ERROR")
         return {"retCode": -1, "retMsg": f"Error updating stop loss: {str(e)}"}
 
+# === POSITIONS ===
+async def get_positions(symbol: str | None = None, market_type: str = "linear"):
+    """
+    Fetch open positions from Bybit V5.
+
+    Args:
+        symbol: Optional symbol filter (e.g., "BTCUSDT")
+        market_type: "linear" for USDT perpetuals
+
+    Returns:
+        List[dict]: [{"symbol": str, "side": "Buy"/"Sell", "size": float, "entryPrice": float, ...}, ...]
+    """
+    try:
+        params = {"category": market_type}
+        if symbol:
+            params["symbol"] = symbol
+
+        resp = await signed_request("GET", "/v5/position/list", params)
+
+        if resp.get("retCode") == 0:
+            items = (resp.get("result", {}) or {}).get("list", []) or []
+            positions = []
+            for p in items:
+                # size field name can vary; fall back safely
+                size = float(p.get("size") or p.get("qty") or 0)
+                positions.append({
+                    "symbol": p.get("symbol"),
+                    "side": p.get("side"),  # "Buy" or "Sell"
+                    "size": size,
+                    "entryPrice": float(p.get("avgPrice") or p.get("entryPrice") or 0),
+                    "leverage": p.get("leverage"),
+                    "positionValue": float(p.get("positionValue") or 0),
+                })
+            return positions
+
+        log(f"❌ Failed to fetch positions: {resp.get('retMsg')}", level="ERROR")
+        return []
+
+    except Exception as e:
+        log(f"❌ Error fetching positions: {e}", level="ERROR")
+        return []
+
+
 async def get_wallet_balance(force_refresh=False):
     """Get wallet balance - redirects to optimized version"""
     return await get_futures_available_balance(force_refresh, "get_wallet_balance")
@@ -577,3 +620,4 @@ async def signed_request_with_balance_optimization(method, endpoint, params):
     """Wrapper that automatically suppresses logs for balance calls"""
     suppress_logs = "/v5/account/wallet-balance" in endpoint
     return await signed_request(method, endpoint, params, suppress_logs)
+

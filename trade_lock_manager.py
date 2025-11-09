@@ -79,20 +79,22 @@ class TradeLockManager:
         Returns True if lock acquired, False if already locked
         """
         lock = self.get_lock(symbol)
-        
+    
         # Try to acquire lock without blocking
         try:
-            acquired = lock.acquire_nowait()
-            if acquired:
+            # Use acquire() instead of acquire_nowait() for async context
+            if not lock.locked():
+                await lock.acquire()
                 # Mark as pending
                 self.pending_trades.add(symbol)
                 self.signal_cooldowns[symbol] = time.time()
                 log(f"🔒 Trade lock acquired for {symbol}")
                 return True
-        except:
-            pass
-        
-        return False
+            else:
+                return False
+        except Exception as e:
+            log(f"❌ Failed to acquire lock for {symbol}: {e}")
+            return False
     
     def release_trade_lock(self, symbol: str, success: bool = False):
         """Release trade lock after processing"""

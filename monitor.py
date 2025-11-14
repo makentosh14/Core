@@ -165,7 +165,7 @@ async def update_stop_loss_order(symbol: str, trade: Dict, new_sl: float) -> boo
         log(f"❌ Error updating SL order for {symbol}: {e}", level="ERROR")
         return False
 
-async def track_active_trade(symbol: str, trade_data: Dict[str, Any], trade_type: Optional[str] = None) -> None:
+async def track_active_trade(symbol: str, trade_data: Dict[str, Any], trade_type: Optional[str] = None, initial_score: Optional[float] = None) -> None:
     """Track an active trade - called when trade is executed"""
     try:
         if trade_type:

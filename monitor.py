@@ -165,14 +165,20 @@ async def update_stop_loss_order(symbol: str, trade: Dict, new_sl: float) -> boo
         log(f"❌ Error updating SL order for {symbol}: {e}", level="ERROR")
         return False
 
-async def track_active_trade(symbol: str, trade_data: Dict[str, Any], trade_type: Optional[str] = None, initial_score: Optional[float] = None, entry_price: Optional[float] = None) -> None:
+async def track_active_trade(symbol: str, trade_data: Dict[str, Any], trade_type: Optional[str] = None, initial_score: Optional[float] = None, entry_price: Optional[float] = None, direction: Optional[str] = None) -> None:
     """Track an active trade - called when trade is executed"""
     try:
         if trade_type:
             trade_data['trade_type'] = trade_type  # Add to data for persistence/logging
+        if initial_score is not None:
+            trade_data['initial_score'] = initial_score  # Add initial score for monitoring/strategies
+        if entry_price is not None:
+            trade_data['entry_price'] = entry_price  # Add entry price for P&L tracking
+        if direction:
+            trade_data['direction'] = direction  # Add for strategy direction tracking
         active_trades[symbol] = trade_data
         save_active_trades()
-        log(f"📌 Now tracking {symbol}: {trade_data.get('direction', 'Unknown')} | Score: {trade_data.get('score', 'N/A')} | Type: {trade_data.get('trade_type', 'Unknown')}")
+        log(f"📌 Now tracking {symbol}: {trade_data.get('direction', 'Unknown')} | Score: {trade_data.get('score', 'N/A')} | Type: {trade_data.get('trade_type', 'Unknown')} | Initial Score: {trade_data.get('initial_score', 'N/A')} | Entry Price: {trade_data.get('entry_price', 'N/A')}")
         
     except Exception as e:
         log(f"❌ Error tracking trade for {symbol}: {e}", level="ERROR")

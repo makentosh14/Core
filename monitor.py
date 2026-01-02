@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
 FIXED monitor.py - Complete imports and dependency setup
+Fixed: track_active_trade() signature to match trade_executor.py calls
+Fixed: Added monitor_active_trades() task start
 """
 
 import asyncio
@@ -41,28 +43,29 @@ def setup_module_dependencies():
     except Exception as e:
         log(f"❌ Error setting up module dependencies: {e}", level="ERROR")
 
+
 def load_active_trades():
     """Load active trades from file"""
     global active_trades
     try:
         with open("active_trades.json", "r") as f:
-            active_trades = json.load(f)
+            active_trades.update(json.load(f))  # Use update to preserve reference
         log(f"✅ Loaded {len(active_trades)} active trades from file")
     except FileNotFoundError:
-        active_trades = {}
         log("📁 No active trades file found, starting fresh")
     except Exception as e:
         log(f"❌ Error loading active trades: {e}", level="ERROR")
-        active_trades = {}
+
 
 def save_active_trades():
     """Save active trades to file"""
     try:
         with open("active_trades.json", "w") as f:
-            json.dump(active_trades, f, indent=2)
+            json.dump(active_trades, f, indent=2, default=str)
         log(f"💾 Saved {len(active_trades)} active trades to file")
     except Exception as e:
         log(f"❌ Error saving active trades: {e}", level="ERROR")
+
 
 async def get_current_price(symbol: str) -> Optional[float]:
     """Get current price for a symbol"""
@@ -75,65 +78,47 @@ async def get_current_price(symbol: str) -> Optional[float]:
         if result.get("retCode") == 0:
             tickers = result.get("result", {}).get("list", [])
             if tickers:
-                return float(tickers[0]["lastPrice"])
-        
-        log(f"❌ Failed to get price for {symbol}", level="ERROR")
+                return float(tickers[0].get("lastPrice", 0))
         return None
         
     except Exception as e:
         log(f"❌ Error getting price for {symbol}: {e}", level="ERROR")
         return None
 
-async def get_candles_for_monitoring(symbol: str) -> Dict[str, list]:
-    """Get candles for monitoring analysis"""
+
+async def get_candles_for_monitoring(symbol: str, interval: str = "5", limit: int = 20):
+    """Get candles for monitoring calculations"""
     try:
-        # Import here to avoid circular imports
-        from websocket_candles import fetch_candles_rest
+        result = await signed_request("GET", "/v5/market/kline", {
+            "category": "linear",
+            "symbol": symbol,
+            "interval": interval,
+            "limit": limit
+        })
         
-        candles_1m = await fetch_candles_rest(symbol, "1", limit=20)
-        
-        return {
-            "1": candles_1m if candles_1m else []
-        }
+        if result.get("retCode") == 0:
+            return result.get("result", {}).get("list", [])
+        return []
         
     except Exception as e:
         log(f"❌ Error getting candles for {symbol}: {e}", level="ERROR")
-        return {"1": []}
+        return []
+
 
 async def update_stop_loss_order(symbol: str, trade: Dict, new_sl: float) -> bool:
-    """Update stop loss order on exchange"""
+    """Update stop loss order for a trade"""
     try:
-        # Get existing stop loss order
-        orders_response = await signed_request("GET", "/v5/order/realtime", {
-            "category": "linear",
-            "symbol": symbol,
-            "settleCoin": "USDT",
-            "orderFilter": "StopOrder"
-        })
-        
-        if orders_response.get("retCode") != 0:
-            log(f"❌ Failed to get orders for {symbol}: {orders_response.get('retMsg')}")
-            return False
-        
-        orders = orders_response.get("result", {}).get("list", [])
-        sl_orders = [o for o in orders if o.get("orderType") in ["Stop", "StopLoss"]]
-        
-        if not sl_orders:
-            log(f"⚠️ No existing SL order found for {symbol}")
-            return False
-        
-        # Cancel existing SL order
-        sl_order = sl_orders[0]
-        cancel_response = await signed_request("POST", "/v5/order/cancel", {
-            "category": "linear",
-            "symbol": symbol,
-            "settleCoin": "USDT",
-            "orderId": sl_order.get("orderId")
-        })
-        
-        if cancel_response.get("retCode") != 0:
-            log(f"❌ Failed to cancel SL order for {symbol}")
-            return False
+        # Cancel existing SL order if present
+        sl_order_id = trade.get("sl_order_id")
+        if sl_order_id:
+            cancel_response = await signed_request("POST", "/v5/order/cancel", {
+                "category": "linear",
+                "symbol": symbol,
+                "orderId": sl_order_id
+            })
+            
+            if cancel_response.get("retCode") != 0:
+                log(f"⚠️ Could not cancel old SL order for {symbol}: {cancel_response.get('retMsg')}")
         
         # Place new SL order
         direction = trade.get("direction", "").lower()
@@ -155,7 +140,9 @@ async def update_stop_loss_order(symbol: str, trade: Dict, new_sl: float) -> boo
         
         if new_sl_response.get("retCode") == 0:
             trade["sl_order_id"] = new_sl_response.get("result", {}).get("orderId")
+            trade["sl"] = new_sl  # Update current SL
             log(f"✅ Updated SL order for {symbol} to {new_sl}")
+            save_active_trades()
             return True
         else:
             log(f"❌ Failed to place new SL order for {symbol}: {new_sl_response.get('retMsg')}")
@@ -165,101 +152,157 @@ async def update_stop_loss_order(symbol: str, trade: Dict, new_sl: float) -> boo
         log(f"❌ Error updating SL order for {symbol}: {e}", level="ERROR")
         return False
 
-async def track_active_trade(symbol: str, trade_data: Dict[str, Any], trade_type: Optional[str] = None, initial_score: Optional[float] = None, entry_price: Optional[float] = None, direction: Optional[str] = None) -> None:
-    """Track an active trade - called when trade is executed"""
+
+async def check_and_restore_sl(symbol: str, trade: Dict) -> bool:
+    """Check if SL order exists and restore if missing"""
     try:
+        # Get open orders for symbol
+        orders_response = await signed_request("GET", "/v5/order/realtime", {
+            "category": "linear",
+            "symbol": symbol
+        })
+        
+        if orders_response.get("retCode") != 0:
+            log(f"❌ Failed to get orders for {symbol}: {orders_response.get('retMsg')}")
+            return False
+        
+        orders = orders_response.get("result", {}).get("list", [])
+        
+        # Check if SL order exists
+        sl_exists = any(
+            order.get("orderType") == "Stop" and order.get("reduceOnly") 
+            for order in orders
+        )
+        
+        if sl_exists:
+            log(f"✅ SL order exists for {symbol}")
+            return True
+        
+        # SL missing - restore it
+        log(f"⚠️ SL order missing for {symbol} - restoring...")
+        
+        sl_price = trade.get("sl") or trade.get("original_sl")
+        if not sl_price:
+            log(f"❌ No SL price found for {symbol}")
+            return False
+        
+        return await update_stop_loss_order(symbol, trade, sl_price)
+        
+    except Exception as e:
+        log(f"❌ Error checking/restoring SL for {symbol}: {e}", level="ERROR")
+        return False
+
+
+# ============================================================
+# FIXED: track_active_trade() with correct signature
+# ============================================================
+async def track_active_trade(
+    symbol: str,
+    trade_data: Dict[str, Any] = None,  # Made optional with default None
+    trade_type: Optional[str] = None,
+    initial_score: Optional[float] = None,
+    entry_price: Optional[float] = None,
+    direction: Optional[str] = None,
+    # NEW parameters that trade_executor.py passes:
+    trailing_pct: Optional[float] = None,
+    tp1_target: Optional[float] = None,
+    tp1_pct: Optional[float] = None,
+    sl: Optional[float] = None,
+    sl_order_id: Optional[str] = None,
+    qty: Optional[float] = None,
+    # Additional optional params
+    score: Optional[float] = None,
+    confidence: Optional[float] = None
+) -> None:
+    """
+    Track an active trade - called when trade is executed
+    
+    Can be called in two ways:
+    1. With trade_data dict: track_active_trade(symbol, trade_data_dict)
+    2. With individual params: track_active_trade(symbol=x, direction=y, ...)
+    """
+    try:
+        # If trade_data is None, create it from individual parameters
+        if trade_data is None:
+            trade_data = {}
+        
+        # Add all parameters to trade_data
         if trade_type:
-            trade_data['trade_type'] = trade_type  # Add to data for persistence/logging
+            trade_data['trade_type'] = trade_type
         if initial_score is not None:
-            trade_data['initial_score'] = initial_score  # Add initial score for monitoring/strategies
+            trade_data['initial_score'] = initial_score
+        if score is not None:
+            trade_data['score'] = score
         if entry_price is not None:
-            trade_data['entry_price'] = entry_price  # Add entry price for P&L tracking
+            trade_data['entry_price'] = entry_price
         if direction:
-            trade_data['direction'] = direction  # Add for strategy direction tracking
+            trade_data['direction'] = direction
+        if trailing_pct is not None:
+            trade_data['trailing_pct'] = trailing_pct
+        if tp1_target is not None:
+            trade_data['tp1_target'] = tp1_target
+        if tp1_pct is not None:
+            trade_data['tp1_pct'] = tp1_pct
+        if sl is not None:
+            trade_data['sl'] = sl
+            trade_data['original_sl'] = sl  # Keep original for reference
+        if sl_order_id:
+            trade_data['sl_order_id'] = sl_order_id
+        if qty is not None:
+            trade_data['qty'] = qty
+        if confidence is not None:
+            trade_data['confidence'] = confidence
+        
+        # Add timestamp if not present
+        if 'timestamp' not in trade_data:
+            trade_data['timestamp'] = datetime.now().isoformat()
+        
+        # Add symbol to trade_data
+        trade_data['symbol'] = symbol
+        
+        # Initialize tracking fields
+        if 'exited' not in trade_data:
+            trade_data['exited'] = False
+        if 'tp1_hit' not in trade_data:
+            trade_data['tp1_hit'] = False
+        if 'trailing_active' not in trade_data:
+            trade_data['trailing_active'] = False
+        
+        # Store in active_trades
         active_trades[symbol] = trade_data
         save_active_trades()
-        log(f"📌 Now tracking {symbol}: {trade_data.get('direction', 'Unknown')} | Score: {trade_data.get('score', 'N/A')} | Type: {trade_data.get('trade_type', 'Unknown')} | Initial Score: {trade_data.get('initial_score', 'N/A')} | Entry Price: {trade_data.get('entry_price', 'N/A')}")
+        
+        log(f"📌 Now tracking {symbol}: {trade_data.get('direction', 'Unknown')} | "
+            f"Entry: {trade_data.get('entry_price', 'N/A')} | "
+            f"SL: {trade_data.get('sl', 'N/A')} | "
+            f"TP1: {trade_data.get('tp1_target', 'N/A')} | "
+            f"Type: {trade_data.get('trade_type', 'Unknown')}")
         
     except Exception as e:
         log(f"❌ Error tracking trade for {symbol}: {e}", level="ERROR")
+        log(traceback.format_exc(), level="ERROR")
+
 
 async def monitor_trades(score_data: Dict[str, Any]) -> None:
     """Monitor trades based on current scores - compatibility function"""
     try:
-        # This is mainly for compatibility with legacy code
-        # The main monitoring is handled by monitor_active_trades()
-        if not score_data:
-            return
-            
-        for symbol in active_trades:
-            if symbol in score_data:
-                current_score = score_data[symbol].get("score", 0)
-                log(f"📊 {symbol} current score: {current_score}")
-        
+        for symbol, data in score_data.items():
+            if symbol in active_trades and not active_trades[symbol].get("exited"):
+                trade = active_trades[symbol]
+                current_score = data.get("score", 0)
+                
+                # Update score history
+                if "score_history" not in trade:
+                    trade["score_history"] = []
+                trade["score_history"].append(current_score)
+                
+                # Keep only last 10 scores
+                if len(trade["score_history"]) > 10:
+                    trade["score_history"] = trade["score_history"][-10:]
+                    
     except Exception as e:
         log(f"❌ Error in monitor_trades: {e}", level="ERROR")
 
-async def check_and_restore_sl(symbol: str, trade: Dict[str, Any]) -> bool:
-    """Check and restore stop loss if missing"""
-    try:
-        log(f"🔍 Checking SL for {symbol}...")
-        
-        # Get current orders
-        orders_response = await signed_request("GET", "/v5/order/realtime", {
-            "category": "linear", 
-            "settleCoin": "USDT",
-            "symbol": symbol,
-            "orderFilter": "StopOrder"
-        })
-        
-        if orders_response.get("retCode") != 0:
-            log(f"❌ Failed to get orders for {symbol}")
-            return False
-            
-        orders = orders_response.get("result", {}).get("list", [])
-        sl_orders = [o for o in orders if o.get("orderType") in ["Stop", "StopLoss"]]
-        
-        if sl_orders:
-            log(f"✅ SL exists for {symbol}")
-            return True
-            
-        # SL missing - try to restore
-        log(f"⚠️ SL missing for {symbol}, attempting restore...")
-        
-        sl_price = trade.get("sl_price") or trade.get("stop_loss")
-        if not sl_price:
-            log(f"❌ No SL price in trade data for {symbol}")
-            return False
-            
-        # Place new SL order
-        direction = trade.get("direction", "")
-        qty = trade.get("qty", "")
-        
-        order_side = "Sell" if direction == "Long" else "Buy"
-        
-        sl_response = await signed_request("POST", "/v5/order/create", {
-            "category": "linear",
-            "symbol": symbol,
-            "side": order_side,
-            "orderType": "Stop",
-            "qty": str(qty),
-            "stopPrice": str(sl_price),
-            "triggerDirection": 1 if direction == "Long" else 2,
-            "timeInForce": "GTC",
-            "settleCoin": "USDT",
-            "reduceOnly": True
-        })
-        
-        if sl_response.get("retCode") == 0:
-            log(f"✅ SL restored for {symbol} at {sl_price}")
-            return True
-        else:
-            log(f"❌ Failed to restore SL for {symbol}: {sl_response.get('retMsg')}")
-            return False
-            
-    except Exception as e:
-        log(f"❌ Error checking/restoring SL for {symbol}: {e}", level="ERROR")
-        return False
 
 async def recover_active_trades_from_exchange() -> None:
     """Recover active trades from exchange positions and orders"""
@@ -302,7 +345,8 @@ async def recover_active_trades_from_exchange() -> None:
                     "unrealized_pnl": unrealized_pnl,
                     "trade_type": "Recovered",
                     "score": 0,
-                    "confidence": 0
+                    "confidence": 0,
+                    "exited": False
                 }
                 
                 active_trades[symbol] = trade_data
@@ -318,6 +362,7 @@ async def recover_active_trades_from_exchange() -> None:
             
     except Exception as e:
         log(f"❌ Error recovering trades from exchange: {e}", level="ERROR")
+
 
 async def handle_reentry_logic(symbol: str, trade: Dict, current_price: float):
     """Handle auto-reentry logic if enabled"""
@@ -337,36 +382,64 @@ async def handle_reentry_logic(symbol: str, trade: Dict, current_price: float):
     except Exception as e:
         log(f"❌ Error in reentry logic for {symbol}: {e}", level="ERROR")
 
+
 async def monitor_active_trades():
     """Main monitoring loop for active trades"""
+    log("🔍 Starting monitor_active_trades() loop...")
+    
+    # Import unified exit manager once at start
+    try:
+        from unified_exit_manager import process_trade_exits
+        exit_manager_available = True
+    except ImportError:
+        log("⚠️ unified_exit_manager not available, using basic monitoring")
+        exit_manager_available = False
+    
     while True:
         try:
-            if not active_trades:
+            # Filter only non-exited trades
+            active = {k: v for k, v in active_trades.items() if not v.get("exited", False)}
+            
+            if not active:
                 await asyncio.sleep(10)
                 continue
             
-            log(f"🔍 Monitoring {len(active_trades)} active trades")
+            log(f"🔍 Monitoring {len(active)} active trades")
             
-            for symbol, trade in list(active_trades.items()):
+            for symbol, trade in list(active.items()):
                 try:
-                    if trade.get("exited"):
-                        continue
-                    
                     # Get current price
                     current_price = await get_current_price(symbol)
                     if not current_price:
+                        log(f"⚠️ Could not get price for {symbol}")
                         continue
                     
-                    # Use unified exit manager for all exit logic
-                    from unified_exit_manager import process_trade_exits
-                    exited = await process_trade_exits(symbol, trade, current_price)
+                    # Check and restore SL if missing
+                    await check_and_restore_sl(symbol, trade)
                     
-                    if exited:
-                        # Add to recent exits for cooldown
-                        recent_exits[symbol] = time.time()
+                    # Use unified exit manager for all exit logic
+                    if exit_manager_available:
+                        exited = await process_trade_exits(symbol, trade, current_price)
                         
-                        # Handle reentry logic if enabled
-                        await handle_reentry_logic(symbol, trade, current_price)
+                        if exited:
+                            # Add to recent exits for cooldown
+                            recent_exits[symbol] = time.time()
+                            
+                            # Handle reentry logic if enabled
+                            await handle_reentry_logic(symbol, trade, current_price)
+                    else:
+                        # Basic P&L logging if exit manager not available
+                        entry_price = trade.get("entry_price", 0)
+                        direction = trade.get("direction", "").lower()
+                        
+                        if entry_price and direction:
+                            if direction == "long":
+                                pnl_pct = ((current_price - entry_price) / entry_price) * 100
+                            else:
+                                pnl_pct = ((entry_price - current_price) / entry_price) * 100
+                            
+                            log(f"📊 {symbol}: Price={current_price:.4f} | P&L={pnl_pct:+.2f}%")
+                            
                 except Exception as e:
                     log(f"❌ Error monitoring {symbol}: {e}", level="ERROR")
                     continue  # Skip to next trade
@@ -381,7 +454,9 @@ async def monitor_active_trades():
             
         except Exception as e:
             log(f"❌ Error in monitoring loop: {e}", level="ERROR")
+            log(traceback.format_exc(), level="ERROR")
             await asyncio.sleep(20)
+
 
 async def periodic_trade_sync():
     """Periodic trade sync function - called from main.py"""
@@ -394,7 +469,9 @@ async def periodic_trade_sync():
                 
             # Reload trades from file
             load_active_trades()
-            log(f"🔄 Periodic sync: {len(active_trades)} active trades")
+            
+            active_count = sum(1 for t in active_trades.values() if not t.get("exited", False))
+            log(f"🔄 Periodic sync: {active_count} active trades (total: {len(active_trades)})")
             
             # Run verification on all trades
             try:
@@ -415,6 +492,77 @@ async def periodic_trade_sync():
         # Sync every 60 seconds
         await asyncio.sleep(60)
 
+
+async def debug_stop_loss(symbol: str):
+    """Debug function to check stop loss status"""
+    try:
+        if symbol not in active_trades:
+            await send_telegram_message(f"❌ {symbol} not in active trades")
+            return
+            
+        trade = active_trades[symbol]
+        
+        # Get open orders
+        orders_response = await signed_request("GET", "/v5/order/realtime", {
+            "category": "linear",
+            "symbol": symbol
+        })
+        
+        orders = orders_response.get("result", {}).get("list", []) if orders_response.get("retCode") == 0 else []
+        
+        # Get position
+        position_response = await signed_request("GET", "/v5/position/list", {
+            "category": "linear",
+            "symbol": symbol
+        })
+        
+        positions = position_response.get("result", {}).get("list", []) if position_response.get("retCode") == 0 else []
+        
+        msg = f"🔍 <b>Debug Report for {symbol}</b>\n\n"
+        msg += f"<b>Trade Data:</b>\n"
+        msg += f"• Direction: {trade.get('direction')}\n"
+        msg += f"• Entry: {trade.get('entry_price')}\n"
+        msg += f"• SL: {trade.get('sl')}\n"
+        msg += f"• Original SL: {trade.get('original_sl')}\n"
+        msg += f"• SL Order ID: {trade.get('sl_order_id')}\n"
+        msg += f"• Qty: {trade.get('qty')}\n"
+        msg += f"• Exited: {trade.get('exited')}\n\n"
+        
+        msg += f"<b>Exchange Orders ({len(orders)}):</b>\n"
+        for order in orders:
+            msg += f"• {order.get('orderType')} {order.get('side')} @ {order.get('stopPrice', order.get('price'))} (ID: {order.get('orderId')[:8]}...)\n"
+        
+        msg += f"\n<b>Position:</b>\n"
+        for pos in positions:
+            if float(pos.get("size", 0)) > 0:
+                msg += f"• {pos.get('side')} {pos.get('size')} @ {pos.get('avgPrice')}\n"
+        
+        await send_telegram_message(msg)
+        
+    except Exception as e:
+        log(f"❌ Error in debug_stop_loss: {e}", level="ERROR")
+        await send_telegram_message(f"❌ Error debugging {symbol}: {e}")
+
+
+async def verify_trade_integrity():
+    """Verify all trades have proper SL orders"""
+    try:
+        log("🔍 Starting trade integrity verification...")
+        
+        for symbol, trade in active_trades.items():
+            if trade.get("exited"):
+                continue
+                
+            await check_and_restore_sl(symbol, trade)
+            await asyncio.sleep(0.5)  # Rate limiting
+            
+        log("✅ Trade integrity verification completed")
+        await send_telegram_message("✅ Trade integrity verification completed")
+        
+    except Exception as e:
+        log(f"❌ Error in trade integrity verification: {e}", level="ERROR")
+
+
 # Export main functions
 __all__ = [
     'active_trades',
@@ -430,7 +578,9 @@ __all__ = [
     'monitor_active_trades',
     'recover_active_trades_from_exchange',
     'periodic_trade_sync',
-    'setup_module_dependencies'
+    'setup_module_dependencies',
+    'debug_stop_loss',
+    'verify_trade_integrity'
 ]
 
 

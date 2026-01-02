@@ -906,7 +906,6 @@ async def run_core_bot():
     
     # Start background tasks
     asyncio.create_task(stream_candles(symbols))
-    asyncio.create_task(core_monitor_loop())
     asyncio.create_task(monitor_active_trades())  # From monitor.py
     asyncio.create_task(monitor_btc_trend_accuracy())
     asyncio.create_task(monitor_altseason_status())
@@ -1009,3 +1008,4 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+

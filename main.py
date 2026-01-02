@@ -803,8 +803,14 @@ async def send_core_strategy_notification(signal_data: Dict, trade_result: Dict)
 
 
 async def core_monitor_loop():
-    """Core strategy specific monitoring loop"""
-    log("🔍 Starting core_monitor_loop...")
+    """
+    Core strategy status logger only.
+    
+    NOTE: All exit logic is handled by monitor.py -> unified_exit_manager.py
+    This function only logs trade status for visibility.
+    DO NOT add exit logic here to avoid duplication!
+    """
+    log("🔍 Starting core_monitor_loop (status logging only)...")
     
     while True:
         try:
@@ -812,77 +818,37 @@ async def core_monitor_loop():
             active = {k: v for k, v in active_trades.items() if not v.get("exited", False)}
             
             if not active:
-                await asyncio.sleep(10)
+                await asyncio.sleep(30)  # Less frequent when no trades
                 continue
             
-            log(f"🔍 CORE STRATEGY: Monitoring {len(active)} trades")
+            # Just log status - no exit logic here!
+            log(f"📊 CORE STATUS: {len(active)} active trades")
             
             for symbol, trade in list(active.items()):
                 try:
-                    await monitor_core_trade(symbol, trade)
-                except Exception as e:
-                    log(f"❌ CORE STRATEGY: Error monitoring {symbol}: {e}", level="ERROR")
-                    continue
+                    pnl = trade.get("current_pnl_pct", 0)
+                    tp1_hit = "✅" if trade.get("tp1_hit") else "⏳"
+                    log(f"   {symbol}: P&L={pnl:+.2f}% | TP1={tp1_hit}")
+                except:
+                    pass
             
-            await asyncio.sleep(10)
+            await asyncio.sleep(30)  # Status update every 30 seconds
             
         except Exception as e:
-            log(f"❌ CORE STRATEGY: Error in monitor loop: {e}", level="ERROR")
-            await asyncio.sleep(20)
+            log(f"❌ CORE STATUS: Error in status loop: {e}", level="ERROR")
+            await asyncio.sleep(60)
 
 
-async def monitor_core_trade(symbol: str, trade: Dict):
-    """
-    Monitor a core strategy trade.
-    Handles trailing stops, P&L tracking, and exit signals.
-    """
-    try:
-        # Get current price
-        current_price = await get_current_price(symbol)
-        if not current_price:
-            return
-        
-        entry_price = trade.get("entry_price", 0)
-        direction = trade.get("direction", "").lower()
-        sl_price = trade.get("sl", 0)
-        tp1_target = trade.get("tp1_target", 0)
-        
-        if not all([entry_price, direction]):
-            return
-        
-        # Calculate P&L
-        if direction == "long":
-            pnl_pct = ((current_price - entry_price) / entry_price) * 100
-        else:
-            pnl_pct = ((entry_price - current_price) / entry_price) * 100
-        
-        # Log status periodically
-        log(f"📊 {symbol}: Price={current_price:.4f} | Entry={entry_price:.4f} | P&L={pnl_pct:+.2f}%")
-        
-        # Check if TP1 hit and activate trailing
-        if tp1_target and not trade.get("tp1_hit"):
-            if direction == "long" and current_price >= tp1_target:
-                trade["tp1_hit"] = True
-                trade["trailing_active"] = True
-                log(f"🎯 {symbol}: TP1 hit! Activating trailing stop")
-                
-                # Move SL to breakeven + small profit
-                new_sl = entry_price * 1.002  # 0.2% profit locked
-                await check_and_restore_sl(symbol, trade)
-                
-            elif direction == "short" and current_price <= tp1_target:
-                trade["tp1_hit"] = True
-                trade["trailing_active"] = True
-                log(f"🎯 {symbol}: TP1 hit! Activating trailing stop")
-                
-                new_sl = entry_price * 0.998
-                await check_and_restore_sl(symbol, trade)
-        
-        # Ensure SL order exists
-        await check_and_restore_sl(symbol, trade)
-        
-    except Exception as e:
-        log(f"❌ CORE STRATEGY: Error monitoring core trade {symbol}: {e}", level="ERROR")
+# NOTE: monitor_core_trade() REMOVED
+# All exit logic is handled by:
+#   monitor.py -> monitor_active_trades() -> unified_exit_manager.process_trade_exits()
+# This prevents duplicate exit logic and keeps the code clean.
+# 
+# The exit flow is:
+#   1. monitor_active_trades() gets current price
+#   2. Calls unified_exit_manager.process_trade_exits()
+#   3. unified_exit_manager handles: SL check, TP1 trigger, breakeven, trailing
+#   4. If exit triggered, closes position on exchange
 
 
 async def run_core_bot():
@@ -906,6 +872,7 @@ async def run_core_bot():
     
     # Start background tasks
     asyncio.create_task(stream_candles(symbols))
+    asyncio.create_task(core_monitor_loop())
     asyncio.create_task(monitor_active_trades())  # From monitor.py
     asyncio.create_task(monitor_btc_trend_accuracy())
     asyncio.create_task(monitor_altseason_status())
@@ -1008,4 +975,3 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
-

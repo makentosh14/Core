@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """
-FIXED unified_exit_manager.py - Resolves circular import issues
+unified_exit_manager.py - SIMPLIFIED VERSION
+Strategy: TP1 → Breakeven → Trailing Stop → Let Winners Run
+
+This is the optimal approach:
+1. Set initial SL
+2. Wait for TP1 level
+3. When TP1 hit: Move SL to breakeven
+4. Activate trailing stop
+5. Let profits run until trailing catches the exit
 """
 
 import asyncio
@@ -13,238 +21,361 @@ from logger import log
 _save_trades_func: Optional[Callable] = None
 _update_sl_func: Optional[Callable] = None
 
-def set_dependencies(save_func: Callable, update_sl_func: Callable = None):
+
+def set_dependencies(save_func: Callable = None, update_sl_func: Callable = None):
     """Set dependencies to avoid circular imports"""
     global _save_trades_func, _update_sl_func
     _save_trades_func = save_func
     _update_sl_func = update_sl_func
+    log("✅ Unified exit manager dependencies set")
 
-# FIXED: Exit configuration with proper percentages for each strategy type
-FIXED_PERCENTAGES = {
+
+# SIMPLIFIED EXIT CONFIGURATION
+# Only what we need: SL, TP1 trigger, and Trailing
+EXIT_CONFIG = {
     "Scalp": {
-        "tp1_pct": 1.5,      # 1.5% take profit for scalps
-        "sl_pct": 1.0,       # 1% stop loss for scalps
-        "trailing_pct": 0.8   # 0.8% trailing stop
+        "sl_pct": 0.8,           # Initial stop loss: -0.8%
+        "tp1_trigger_pct": 1.2,  # TP1 level to trigger breakeven + trailing: +1.2%
+        "trailing_pct": 0.5,     # Trailing stop distance: 0.5%
+        "breakeven_buffer": 0.1  # Buffer above entry for breakeven: +0.1%
     },
     "Intraday": {
-        "tp1_pct": 2.5,      # 2.5% take profit for intraday
-        "sl_pct": 1.5,       # 1.5% stop loss for intraday
-        "trailing_pct": 1.2   # 1.2% trailing stop
+        "sl_pct": 1.0,           # Initial stop loss: -1.0%
+        "tp1_trigger_pct": 2.0,  # TP1 level: +2.0%
+        "trailing_pct": 0.8,     # Trailing stop: 0.8%
+        "breakeven_buffer": 0.1  # Breakeven buffer: +0.1%
     },
     "Swing": {
-        "tp1_pct": 4.0,      # 4% take profit for swing
-        "sl_pct": 2.0,       # 2% stop loss for swing
-        "trailing_pct": 2.0   # 2% trailing stop
+        "sl_pct": 1.5,           # Initial stop loss: -1.5%
+        "tp1_trigger_pct": 3.5,  # TP1 level: +3.5%
+        "trailing_pct": 1.2,     # Trailing stop: 1.2%
+        "breakeven_buffer": 0.15 # Breakeven buffer: +0.15%
+    },
+    "CoreScalp": {
+        "sl_pct": 0.8,
+        "tp1_trigger_pct": 1.2,
+        "trailing_pct": 0.5,
+        "breakeven_buffer": 0.1
+    },
+    "CoreIntraday": {
+        "sl_pct": 1.0,
+        "tp1_trigger_pct": 2.0,
+        "trailing_pct": 0.8,
+        "breakeven_buffer": 0.1
+    },
+    "CoreSwing": {
+        "sl_pct": 1.5,
+        "tp1_trigger_pct": 3.5,
+        "trailing_pct": 1.2,
+        "breakeven_buffer": 0.15
     },
     "Default": {
-        "tp1_pct": 2.0,      # Default 2% take profit
-        "sl_pct": 1.5,       # Default 1.5% stop loss
-        "trailing_pct": 1.0   # Default 1% trailing stop
+        "sl_pct": 1.0,
+        "tp1_trigger_pct": 2.0,
+        "trailing_pct": 0.8,
+        "breakeven_buffer": 0.1
     }
 }
 
+
 class UnifiedExitManager:
-    """Unified exit manager to handle all trade exits consistently"""
+    """
+    Simplified exit manager using the optimal strategy:
+    Entry → TP1 → Breakeven → Trailing → Exit
+    """
     
     def __init__(self):
-        self.last_update = {}
-        self.trailing_highs = {}
-        self.trailing_lows = {}
+        # Track highest price (for longs) or lowest price (for shorts) after TP1
+        self.trailing_highs: Dict[str, float] = {}
+        self.trailing_lows: Dict[str, float] = {}
         
-    async def process_trade_exit_logic(self, symbol: str, trade: Dict, current_price: float, candles: Optional[Dict] = None) -> bool:
+        # Track which trades have hit TP1 (activates breakeven + trailing)
+        self.tp1_activated: Dict[str, bool] = {}
+        
+        # Track breakeven SL prices
+        self.breakeven_prices: Dict[str, float] = {}
+        
+        # Throttle saves
+        self.last_save: Dict[str, float] = {}
+    
+    def get_config(self, trade: Dict) -> Dict:
+        """Get exit config for trade type"""
+        trade_type = (
+            trade.get("strategy_type") or 
+            trade.get("trade_type") or 
+            trade.get("type") or 
+            "Default"
+        )
+        # Normalize - remove "Core" prefix for lookup if not found
+        if trade_type not in EXIT_CONFIG:
+            trade_type = trade_type.replace("Core", "")
+        if trade_type not in EXIT_CONFIG:
+            trade_type = "Default"
+        
+        return EXIT_CONFIG[trade_type]
+    
+    async def process_exit(
+        self, 
+        symbol: str, 
+        trade: Dict, 
+        current_price: float
+    ) -> bool:
         """
-        Main exit processing function - handles all exit conditions
-        Returns True if trade was exited, False otherwise
+        Main exit processing - SIMPLIFIED LOGIC
+        
+        Flow:
+        1. Check hard SL (initial or breakeven)
+        2. Check if TP1 hit → activate breakeven + trailing
+        3. If trailing active, check trailing stop
+        4. Update trailing high/low
+        
+        Returns True if trade exited, False otherwise
         """
         try:
+            # Skip if already exited
             if trade.get("exited"):
                 return False
             
+            # Validate inputs
             direction = trade.get("direction", "").lower()
-            if not direction or not current_price:
-                return False
-            
             entry_price = float(trade.get("entry_price", 0))
-            if not entry_price:
+            
+            if not direction or not entry_price or not current_price:
                 return False
             
-            # Get strategy type for appropriate exit parameters
-            strategy_type = trade.get("strategy_type", "Default")
-            exit_params = FIXED_PERCENTAGES.get(strategy_type, FIXED_PERCENTAGES["Default"])
+            # Get config for this trade type
+            config = self.get_config(trade)
             
-            # Calculate current PnL percentage
+            # Calculate current PnL
             if direction == "long":
                 pnl_pct = ((current_price - entry_price) / entry_price) * 100
             else:
                 pnl_pct = ((entry_price - current_price) / entry_price) * 100
             
-            # Update trade with current PnL
-            trade["current_pnl_pct"] = pnl_pct
+            # Update trade state
+            trade["current_pnl_pct"] = round(pnl_pct, 2)
             trade["current_price"] = current_price
-            trade["last_check_time"] = datetime.now().isoformat()
+            trade["last_check"] = datetime.now().isoformat()
             
-            # 1. Check stop loss
-            if await self._check_stop_loss(symbol, trade, current_price, pnl_pct, exit_params):
+            # === STEP 1: Check Stop Loss ===
+            if await self._check_stop_loss(symbol, trade, current_price, pnl_pct, config, direction, entry_price):
                 return True
             
-            # 2. Check take profit
-            if await self._check_take_profit(symbol, trade, current_price, pnl_pct, exit_params):
-                return True
+            # === STEP 2: Check TP1 Trigger (activates breakeven + trailing) ===
+            self._check_tp1_trigger(symbol, trade, current_price, pnl_pct, config, direction, entry_price)
             
-            # 3. Check trailing stop
-            if await self._check_trailing_stop(symbol, trade, current_price, pnl_pct, exit_params):
-                return True
+            # === STEP 3: Check Trailing Stop (only if TP1 activated) ===
+            if self.tp1_activated.get(symbol, False):
+                if await self._check_trailing_stop(symbol, trade, current_price, pnl_pct, config, direction):
+                    return True
+                
+                # Update trailing high/low
+                self._update_trailing_level(symbol, current_price, direction)
             
-            # 4. Update trailing levels
-            self._update_trailing_levels(symbol, trade, current_price, direction)
-            
-            # 5. Save trade state periodically
-            self._save_trade_state(symbol, trade)
+            # Save state
+            self._save_state(symbol, trade)
             
             return False
             
         except Exception as e:
-            log(f"❌ Error in unified exit manager for {symbol}: {e}", level="ERROR")
+            log(f"❌ Exit manager error for {symbol}: {e}", level="ERROR")
+            import traceback
+            log(traceback.format_exc(), level="ERROR")
             return False
     
-    async def _check_stop_loss(self, symbol: str, trade: Dict, current_price: float, pnl_pct: float, exit_params: Dict) -> bool:
-        """Check if stop loss should be triggered"""
-        try:
-            sl_pct = exit_params.get("sl_pct", 1.5)
-            
-            # Simple stop loss check
+    async def _check_stop_loss(
+        self, 
+        symbol: str, 
+        trade: Dict, 
+        current_price: float, 
+        pnl_pct: float, 
+        config: Dict,
+        direction: str,
+        entry_price: float
+    ) -> bool:
+        """Check if stop loss hit (either initial SL or breakeven SL)"""
+        
+        # If TP1 activated, use breakeven SL
+        if self.tp1_activated.get(symbol, False):
+            breakeven_sl = self.breakeven_prices.get(symbol)
+            if breakeven_sl:
+                if direction == "long" and current_price <= breakeven_sl:
+                    await self._exit_trade(symbol, trade, current_price, "breakeven_stop", pnl_pct)
+                    return True
+                elif direction == "short" and current_price >= breakeven_sl:
+                    await self._exit_trade(symbol, trade, current_price, "breakeven_stop", pnl_pct)
+                    return True
+        
+        # Check initial SL (only if TP1 not yet activated)
+        else:
+            sl_pct = config["sl_pct"]
             if pnl_pct <= -sl_pct:
                 await self._exit_trade(symbol, trade, current_price, "stop_loss", pnl_pct)
                 return True
-            
-            return False
-            
-        except Exception as e:
-            log(f"❌ Error checking stop loss for {symbol}: {e}", level="ERROR")
-            return False
+        
+        return False
     
-    async def _check_take_profit(self, symbol: str, trade: Dict, current_price: float, pnl_pct: float, exit_params: Dict) -> bool:
-        """Check if take profit should be triggered"""
-        try:
-            tp_pct = exit_params.get("tp1_pct", 2.0)
+    def _check_tp1_trigger(
+        self, 
+        symbol: str, 
+        trade: Dict, 
+        current_price: float, 
+        pnl_pct: float, 
+        config: Dict,
+        direction: str,
+        entry_price: float
+    ):
+        """Check if TP1 level reached - activates breakeven + trailing"""
+        
+        # Skip if already activated
+        if self.tp1_activated.get(symbol, False):
+            return
+        
+        tp1_pct = config["tp1_trigger_pct"]
+        
+        # Check if TP1 reached
+        if pnl_pct >= tp1_pct:
+            self.tp1_activated[symbol] = True
+            trade["tp1_hit"] = True
+            trade["tp1_hit_time"] = datetime.now().isoformat()
+            trade["tp1_hit_price"] = current_price
             
-            # Simple take profit check
-            if pnl_pct >= tp_pct:
-                await self._exit_trade(symbol, trade, current_price, "take_profit", pnl_pct)
-                return True
-            
-            return False
-            
-        except Exception as e:
-            log(f"❌ Error checking take profit for {symbol}: {e}", level="ERROR")
-            return False
-    
-    async def _check_trailing_stop(self, symbol: str, trade: Dict, current_price: float, pnl_pct: float, exit_params: Dict) -> bool:
-        """Check if trailing stop should be triggered"""
-        try:
-            direction = trade.get("direction", "").lower()
-            trailing_pct = exit_params.get("trailing_pct", 1.0)
-            
-            # Only activate trailing stop when in profit
-            if pnl_pct <= 0.5:  # Need at least 0.5% profit to activate trailing
-                return False
-            
+            # Calculate breakeven price (entry + small buffer for fees)
+            buffer_pct = config["breakeven_buffer"]
             if direction == "long":
-                trailing_high = self.trailing_highs.get(symbol, current_price)
-                trailing_stop = trailing_high * (1 - trailing_pct / 100)
-                
-                if current_price <= trailing_stop:
-                    await self._exit_trade(symbol, trade, current_price, "trailing_stop", pnl_pct)
-                    return True
-                    
-            else:  # short
-                trailing_low = self.trailing_lows.get(symbol, current_price)
-                trailing_stop = trailing_low * (1 + trailing_pct / 100)
-                
-                if current_price >= trailing_stop:
-                    await self._exit_trade(symbol, trade, current_price, "trailing_stop", pnl_pct)
-                    return True
-            
-            return False
-            
-        except Exception as e:
-            log(f"❌ Error checking trailing stop for {symbol}: {e}", level="ERROR")
-            return False
-    
-    def _update_trailing_levels(self, symbol: str, trade: Dict, current_price: float, direction: str):
-        """Update trailing high/low levels"""
-        try:
-            if direction == "long":
-                if symbol not in self.trailing_highs:
-                    self.trailing_highs[symbol] = current_price
-                else:
-                    self.trailing_highs[symbol] = max(self.trailing_highs[symbol], current_price)
+                breakeven_price = entry_price * (1 + buffer_pct / 100)
             else:
-                if symbol not in self.trailing_lows:
-                    self.trailing_lows[symbol] = current_price
-                else:
-                    self.trailing_lows[symbol] = min(self.trailing_lows[symbol], current_price)
-                    
-        except Exception as e:
-            log(f"❌ Error updating trailing levels for {symbol}: {e}", level="ERROR")
+                breakeven_price = entry_price * (1 - buffer_pct / 100)
+            
+            self.breakeven_prices[symbol] = breakeven_price
+            trade["breakeven_sl"] = breakeven_price
+            
+            # Initialize trailing from current price
+            if direction == "long":
+                self.trailing_highs[symbol] = current_price
+            else:
+                self.trailing_lows[symbol] = current_price
+            
+            log(f"🎯 {symbol}: TP1 HIT at {pnl_pct:.2f}%!")
+            log(f"   → SL moved to breakeven: {breakeven_price:.4f}")
+            log(f"   → Trailing stop ACTIVATED")
+            
+            # Try to update SL on exchange
+            asyncio.create_task(self._update_exchange_sl(symbol, trade, breakeven_price))
     
-    async def _exit_trade(self, symbol: str, trade: Dict, current_price: float, exit_reason: str, pnl_pct: float):
-        """Exit a trade with the specified reason"""
-        try:
-            log(f"🚪 UNIFIED EXIT: {symbol} {exit_reason} at {current_price} ({pnl_pct:+.2f}%)")
+    async def _check_trailing_stop(
+        self, 
+        symbol: str, 
+        trade: Dict, 
+        current_price: float, 
+        pnl_pct: float, 
+        config: Dict,
+        direction: str
+    ) -> bool:
+        """Check if trailing stop triggered"""
+        
+        trailing_pct = config["trailing_pct"]
+        
+        if direction == "long":
+            trailing_high = self.trailing_highs.get(symbol, current_price)
+            trailing_stop = trailing_high * (1 - trailing_pct / 100)
             
-            # Mark trade as exited
-            trade["exited"] = True
-            trade["exit_reason"] = exit_reason
-            trade["exit_price"] = current_price
-            trade["exit_time"] = datetime.now().isoformat()
-            trade["final_pnl_pct"] = pnl_pct
+            if current_price <= trailing_stop:
+                log(f"📉 {symbol}: Trailing stop hit! High: {trailing_high:.4f}, Stop: {trailing_stop:.4f}, Current: {current_price:.4f}")
+                await self._exit_trade(symbol, trade, current_price, "trailing_stop", pnl_pct)
+                return True
+        else:
+            trailing_low = self.trailing_lows.get(symbol, current_price)
+            trailing_stop = trailing_low * (1 + trailing_pct / 100)
             
-            # Calculate final PnL in USDT
-            entry_price = float(trade.get("entry_price", 0))
-            qty = float(trade.get("qty", 0))
-            
-            if entry_price > 0 and qty > 0:
-                if trade.get("direction", "").lower() == "long":
-                    pnl_usdt = (current_price - entry_price) * qty
-                else:
-                    pnl_usdt = (entry_price - current_price) * qty
-                
-                trade["final_pnl_usdt"] = pnl_usdt
-                log(f"💰 Final PnL: {pnl_usdt:+.2f} USDT ({pnl_pct:+.2f}%)")
-            
-            # Clean up trailing levels
-            self.trailing_highs.pop(symbol, None)
-            self.trailing_lows.pop(symbol, None)
-            
-            # Try to close position on exchange
-            try:
-                await self._close_position_on_exchange(symbol, trade)
-            except Exception as e:
-                log(f"⚠️ Failed to close position on exchange for {symbol}: {e}")
-            
-            # Send exit notification
-            await self._send_exit_notification(symbol, trade, exit_reason, pnl_pct)
-            
-            # Save trade state
-            self._save_trade_state(symbol, trade)
-            
-        except Exception as e:
-            log(f"❌ Error exiting trade {symbol}: {e}", level="ERROR")
+            if current_price >= trailing_stop:
+                log(f"📈 {symbol}: Trailing stop hit! Low: {trailing_low:.4f}, Stop: {trailing_stop:.4f}, Current: {current_price:.4f}")
+                await self._exit_trade(symbol, trade, current_price, "trailing_stop", pnl_pct)
+                return True
+        
+        return False
     
-    async def _close_position_on_exchange(self, symbol: str, trade: Dict):
-        """Close position on the exchange"""
+    def _update_trailing_level(self, symbol: str, current_price: float, direction: str):
+        """Update trailing high/low as price moves in our favor"""
+        
+        if direction == "long":
+            old_high = self.trailing_highs.get(symbol, current_price)
+            if current_price > old_high:
+                self.trailing_highs[symbol] = current_price
+                log(f"📈 {symbol}: New trailing high: {old_high:.4f} → {current_price:.4f}")
+        else:
+            old_low = self.trailing_lows.get(symbol, current_price)
+            if current_price < old_low:
+                self.trailing_lows[symbol] = current_price
+                log(f"📉 {symbol}: New trailing low: {old_low:.4f} → {current_price:.4f}")
+    
+    async def _exit_trade(
+        self, 
+        symbol: str, 
+        trade: Dict, 
+        current_price: float, 
+        reason: str, 
+        pnl_pct: float
+    ):
+        """Execute trade exit"""
+        
+        log(f"🚪 EXIT: {symbol} | Reason: {reason} | PnL: {pnl_pct:+.2f}%")
+        
+        # Mark trade as exited
+        trade["exited"] = True
+        trade["exit_reason"] = reason
+        trade["exit_price"] = current_price
+        trade["exit_time"] = datetime.now().isoformat()
+        trade["final_pnl_pct"] = round(pnl_pct, 2)
+        
+        # Calculate USDT P&L
+        entry_price = float(trade.get("entry_price", 0))
+        qty = float(trade.get("qty", 0))
+        direction = trade.get("direction", "").lower()
+        
+        if entry_price > 0 and qty > 0:
+            if direction == "long":
+                pnl_usdt = (current_price - entry_price) * qty
+            else:
+                pnl_usdt = (entry_price - current_price) * qty
+            
+            trade["final_pnl_usdt"] = round(pnl_usdt, 2)
+            log(f"💰 P&L: {pnl_usdt:+.2f} USDT ({pnl_pct:+.2f}%)")
+        
+        # Cleanup tracking
+        self._cleanup(symbol)
+        
+        # Close on exchange
+        await self._close_on_exchange(symbol, trade)
+        
+        # Send notification
+        await self._send_notification(symbol, trade, reason, pnl_pct)
+        
+        # Save
+        if _save_trades_func:
+            _save_trades_func()
+    
+    def _cleanup(self, symbol: str):
+        """Clean up tracking data for symbol"""
+        self.trailing_highs.pop(symbol, None)
+        self.trailing_lows.pop(symbol, None)
+        self.tp1_activated.pop(symbol, None)
+        self.breakeven_prices.pop(symbol, None)
+        self.last_save.pop(symbol, None)
+    
+    async def _close_on_exchange(self, symbol: str, trade: Dict):
+        """Close position on Bybit"""
         try:
-            # This would integrate with your bybit_api module
             from bybit_api import signed_request
             
             direction = trade.get("direction", "").lower()
             qty = trade.get("qty", 0)
             
-            # Determine side for closing order
+            if not qty:
+                return
+            
             side = "Sell" if direction == "long" else "Buy"
             
-            # Place market order to close position
             response = await signed_request("POST", "/v5/order/create", {
                 "category": "linear",
                 "symbol": symbol,
@@ -256,139 +387,130 @@ class UnifiedExitManager:
             })
             
             if response.get("retCode") == 0:
-                log(f"✅ Position closed on exchange for {symbol}")
-                trade["exchange_close_order_id"] = response.get("result", {}).get("orderId")
+                log(f"✅ {symbol}: Position closed on exchange")
             else:
-                log(f"❌ Failed to close position for {symbol}: {response.get('retMsg')}")
+                log(f"❌ {symbol}: Failed to close - {response.get('retMsg')}", level="ERROR")
                 
         except Exception as e:
-            log(f"❌ Error closing position on exchange for {symbol}: {e}")
+            log(f"❌ {symbol}: Exchange close error - {e}", level="ERROR")
     
-    async def _send_exit_notification(self, symbol: str, trade: Dict, exit_reason: str, pnl_pct: float):
-        """Send exit notification via Telegram"""
+    async def _update_exchange_sl(self, symbol: str, trade: Dict, new_sl: float):
+        """Update SL on exchange"""
+        try:
+            if _update_sl_func:
+                await _update_sl_func(symbol, trade, new_sl)
+                log(f"✅ {symbol}: Exchange SL updated to {new_sl:.4f}")
+        except Exception as e:
+            log(f"⚠️ {symbol}: Failed to update exchange SL - {e}", level="WARN")
+    
+    async def _send_notification(self, symbol: str, trade: Dict, reason: str, pnl_pct: float):
+        """Send Telegram notification"""
         try:
             from error_handler import send_telegram_message
             
-            strategy_type = trade.get("strategy_type", "Unknown")
-            entry_price = trade.get("entry_price", 0)
-            exit_price = trade.get("exit_price", 0)
-            qty = trade.get("qty", 0)
-            direction = trade.get("direction", "").upper()
-            
-            # Determine emoji based on PnL
-            if pnl_pct > 0:
+            # Emoji based on result
+            if pnl_pct >= 2.0:
+                emoji = "🟢🎉"
+            elif pnl_pct > 0:
                 emoji = "🟢"
-                result = "PROFIT"
+            elif pnl_pct > -0.5:
+                emoji = "🟡"
             else:
-                emoji = "🔴" 
-                result = "LOSS"
+                emoji = "🔴"
             
             msg = f"{emoji} <b>TRADE EXIT</b>\n\n"
-            msg += f"📊 <b>Symbol:</b> {symbol}\n"
-            msg += f"📈 <b>Direction:</b> {direction}\n"
-            msg += f"🎲 <b>Strategy:</b> {strategy_type}\n"
-            msg += f"🚪 <b>Exit Reason:</b> {exit_reason.replace('_', ' ').title()}\n"
-            msg += f"💰 <b>Entry:</b> {entry_price}\n"
-            msg += f"🎯 <b>Exit:</b> {exit_price}\n"
-            msg += f"📊 <b>Quantity:</b> {qty}\n"
-            msg += f"💵 <b>Result:</b> {result} {pnl_pct:+.2f}%"
+            msg += f"📊 Symbol: <b>{symbol}</b>\n"
+            msg += f"📈 Direction: <b>{trade.get('direction', '').upper()}</b>\n"
+            msg += f"🚪 Reason: <b>{reason.replace('_', ' ').title()}</b>\n"
+            msg += f"💰 Entry: {trade.get('entry_price')}\n"
+            msg += f"🎯 Exit: {trade.get('exit_price')}\n"
+            msg += f"💵 PnL: <b>{pnl_pct:+.2f}%</b>"
             
             if trade.get("final_pnl_usdt"):
-                msg += f"\n💸 <b>PnL:</b> {trade['final_pnl_usdt']:+.2f} USDT"
+                msg += f" ({trade['final_pnl_usdt']:+.2f} USDT)"
             
             await send_telegram_message(msg)
             
         except Exception as e:
-            log(f"❌ Error sending exit notification for {symbol}: {e}")
+            log(f"⚠️ Notification error: {e}", level="WARN")
     
-    async def update_trailing_stop(self, symbol: str, trade: Dict, new_trailing_sl: float) -> bool:
-        """Update trailing stop loss for a trade"""
-        try:
-            old_sl = trade.get("sl", 0)
-            trade["sl"] = new_trailing_sl
-            trade["trailing_updated"] = True
-            trade["trailing_update_time"] = datetime.now().isoformat()
-            
-            log(f"📈 Updated trailing SL for {symbol}: {old_sl} → {new_trailing_sl}")
-            
-            # Try to update the exchange order
-            try:
-                if _update_sl_func:
-                    sl_updated = await _update_sl_func(symbol, trade, new_trailing_sl)
-                    if sl_updated:
-                        log(f"✅ Exchange SL order updated for {symbol}")
-                    else:
-                        log(f"⚠️ Failed to update exchange SL for {symbol}")
-                else:
-                    log(f"⚠️ No SL update function available for {symbol}")
-            except Exception as e:
-                log(f"⚠️ Error updating exchange SL for {symbol}: {e}")
-            
-            return True
-            
-        except Exception as e:
-            log(f"❌ Error updating trailing stop for {symbol}: {e}", level="ERROR")
-            return False
+    def _save_state(self, symbol: str, trade: Dict):
+        """Save trade state (throttled)"""
+        now = time.time()
+        if now - self.last_save.get(symbol, 0) < 5:
+            return
+        self.last_save[symbol] = now
+        
+        if _save_trades_func:
+            _save_trades_func()
     
-    def _save_trade_state(self, symbol: str, trade: Dict):
-        """Save trade state to file"""
-        try:
-            if _save_trades_func:
-                _save_trades_func()
-            else:
-                log(f"⚠️ No save function available for {symbol}")
-            
-        except Exception as e:
-            log(f"❌ Error saving trade state for {symbol}: {e}", level="ERROR")
+    def get_status(self, symbol: str) -> Dict:
+        """Get current status for a symbol"""
+        return {
+            "tp1_activated": self.tp1_activated.get(symbol, False),
+            "breakeven_sl": self.breakeven_prices.get(symbol),
+            "trailing_high": self.trailing_highs.get(symbol),
+            "trailing_low": self.trailing_lows.get(symbol)
+        }
+    
+    def reset_symbol(self, symbol: str):
+        """Reset tracking for a symbol (manual close)"""
+        self._cleanup(symbol)
+        log(f"🔄 {symbol}: Tracking reset")
 
-# Create global instance
+
+# Global instance
 exit_manager = UnifiedExitManager()
 
-# MAIN FUNCTIONS TO CALL FROM OTHER FILES
 
-async def process_trade_exits(symbol: str, trade: Dict, current_price: float, candles: Optional[Dict] = None) -> bool:
+# === PUBLIC API ===
+
+async def process_trade_exits(symbol: str, trade: Dict, current_price: float) -> bool:
     """
-    MAIN FUNCTION: Call this from monitor.py and active_trade_scanner.py
-    This replaces ALL other exit handling functions
+    MAIN FUNCTION - Call this from monitor.py
+    
+    Returns True if trade was exited
     """
-    return await exit_manager.process_trade_exit_logic(symbol, trade, current_price, candles)
+    return await exit_manager.process_exit(symbol, trade, current_price)
 
-async def update_trailing_stop_loss(symbol: str, trade: Dict, new_sl: float) -> bool:
-    """Update trailing stop loss for a trade"""
-    return await exit_manager.update_trailing_stop(symbol, trade, new_sl)
 
-def validate_exit_configuration() -> bool:
-    """Validate that exit configuration is correct"""
-    log("🔍 Validating unified exit manager configuration...")
-    
-    for trade_type, params in FIXED_PERCENTAGES.items():
-        required_keys = ["tp1_pct", "sl_pct", "trailing_pct"]
-        for key in required_keys:
-            if key not in params:
-                log(f"❌ Missing {key} in {trade_type} configuration", level="ERROR")
-                return False
-            if params[key] <= 0:
-                log(f"❌ Invalid {key} value in {trade_type}: {params[key]}", level="ERROR")
-                return False
-    
-    log("✅ Unified exit manager configuration validated")
-    return True
+def get_exit_status(symbol: str) -> Dict:
+    """Get exit status for a symbol"""
+    return exit_manager.get_status(symbol)
 
-def get_exit_parameters(strategy_type: str) -> Dict:
-    """Get exit parameters for a strategy type"""
-    return FIXED_PERCENTAGES.get(strategy_type, FIXED_PERCENTAGES["Default"])
 
-# Export main functions
+def reset_symbol_tracking(symbol: str):
+    """Reset tracking for a symbol"""
+    exit_manager.reset_symbol(symbol)
+
+
+def get_exit_config(trade_type: str) -> Dict:
+    """Get exit config for a trade type"""
+    if trade_type not in EXIT_CONFIG:
+        trade_type = trade_type.replace("Core", "")
+    return EXIT_CONFIG.get(trade_type, EXIT_CONFIG["Default"])
+
+
+# Exports
 __all__ = [
     'process_trade_exits',
-    'update_trailing_stop_loss', 
-    'validate_exit_configuration',
-    'get_exit_parameters',
+    'get_exit_status',
+    'reset_symbol_tracking',
+    'get_exit_config',
     'set_dependencies',
-    'UnifiedExitManager'
+    'EXIT_CONFIG'
 ]
 
-# Initialize on import
+
 if __name__ == "__main__":
-    validate_exit_configuration()
-    print("✅ unified_exit_manager.py module is working correctly")
+    print("✅ Simplified unified_exit_manager.py loaded")
+    print("\n📊 Exit Configuration:")
+    print("=" * 50)
+    for trade_type, config in EXIT_CONFIG.items():
+        if trade_type.startswith("Core"):
+            continue  # Skip Core variants (same as base)
+        print(f"\n{trade_type}:")
+        print(f"  SL: -{config['sl_pct']}%")
+        print(f"  TP1 Trigger: +{config['tp1_trigger_pct']}%")
+        print(f"  Trailing: {config['trailing_pct']}%")
+        print(f"  Breakeven Buffer: +{config['breakeven_buffer']}%")

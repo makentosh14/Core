@@ -23,6 +23,7 @@ from symbol_info import fetch_symbol_info
 from activity_logger import write_log, log_trade_to_file
 from monitor import track_active_trade, monitor_trades, load_active_trades, check_and_restore_sl, active_trades, recover_active_trades_from_exchange, periodic_trade_sync
 from trade_lock_manager import trade_lock_manager
+from monitor import monitor_active_trades
 
 log(f"🔍 main.py - Core Strategy Only - imported active_trades id: {id(active_trades)}")
 
@@ -1205,6 +1206,7 @@ async def run_core_bot():
     # Minimal task setup - only what's needed for core strategy
     asyncio.create_task(stream_candles(symbols))
     asyncio.create_task(core_monitor_loop())
+    asyncio.create_task(monitor_active_trades())
     asyncio.create_task(monitor_btc_trend_accuracy())  # Keep trend monitoring
     asyncio.create_task(monitor_altseason_status())    # Keep altseason monitoring
     asyncio.create_task(periodic_trade_sync())         # Keep trade sync
@@ -1298,6 +1300,7 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+
 
 
 

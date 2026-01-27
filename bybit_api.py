@@ -45,7 +45,7 @@ async def signed_request(method, endpoint, params, suppress_balance_logs=False):
     """
     try:
         timestamp = str(int(time.time() * 1000))
-        recv_window = "5000"
+        recv_window = "20000"
         
         if method.upper() == "GET":
             query_string = "&".join(f"{k}={v}" for k, v in params.items()) if params else ""
@@ -624,5 +624,6 @@ async def signed_request_with_balance_optimization(method, endpoint, params):
     """Wrapper that automatically suppresses logs for balance calls"""
     suppress_logs = "/v5/account/wallet-balance" in endpoint
     return await signed_request(method, endpoint, params, suppress_logs)
+
 
 

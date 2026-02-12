@@ -372,7 +372,7 @@ def get_rsi_trend(rsi_values: List[float], symbol: str = "", period: int = 5) ->
         log(f"❌ RSI trend calculation error for {symbol}: {e}", level="ERROR")
         return "neutral"
 
-def analyze_multi_timeframe_rsi(candles_by_tf: Dict[str, List[Dict]], symbol: str = "",
+def analyze_multi_timeframe_rsi(symbol: str, candles_by_tf: Dict[str, List[Dict]],
                                periods: Dict[str, int] = None, 
                                overbought: float = 70, oversold: float = 30) -> Dict:
     """
@@ -539,4 +539,5 @@ def calculate_rsi_with_bands(candles: List[Dict], period: int = 14,
     Legacy function - use calculate_rsi_with_scoring for new implementations
     """
     return calculate_rsi_with_scoring(candles, period, "", overbought, oversold)
+
 

@@ -444,7 +444,7 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
     
     # Calculate MTF RSI
     try:
-        mtf_rsi = analyze_multi_timeframe_rsi(candles_by_timeframe)
+        mtf_rsi = analyze_multi_timeframe_rsi(symbol, candles_by_timeframe)
     except Exception as e:
         log(f"⚠️ MTF RSI calculation failed: {e}", level="WARN")
     

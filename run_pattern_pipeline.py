@@ -39,7 +39,7 @@ except ImportError:
 # ── Import our pipeline modules ────────────────────────────────
 from features import compute_features
 from label_events import label_events_multi_horizon, HORIZON_MINUTES, THRESHOLDS
-from miner import RuleMiner, build_samples
+from miner import RuleMiner, build_samples  # miner.py updated to v2 (lift-based thresholds)
 from export_rules import export_rules, generate_report
 
 # ────────────────────────────────────────────────────────────────
@@ -52,8 +52,9 @@ DEFAULT_TOP_N    = 50          # top N symbols by 24h turnover
 DEFAULT_DAYS     = 90          # history to fetch per symbol
 DEFAULT_CANDLE_LIMIT = 1000    # candles per REST request (Bybit max=1000)
 DEFAULT_TF       = "15"        # event detection timeframe
-DEFAULT_MIN_SAMPLE = 100       # minimum triggers for a rule to be valid
-DEFAULT_MIN_PRECISION = 0.52   # minimum precision (win rate)
+DEFAULT_MIN_SAMPLE    = 50       # minimum triggers for a rule to be valid
+DEFAULT_MIN_LIFT      = 2.0
+DEFAULT_MIN_PRECISION = 0.15   # minimum precision (win rate)
 
 BASE_TF     = "15"
 CONFIRM_TF1 = "60"
@@ -192,14 +193,15 @@ async def run_pipeline(
     days:         int  = DEFAULT_DAYS,
     tf:           str  = DEFAULT_TF,
     min_sample:   int  = DEFAULT_MIN_SAMPLE,
+    min_lift:     float = DEFAULT_MIN_LIFT,
     min_precision: float = DEFAULT_MIN_PRECISION,
     window:       int  = 30,
     send_telegram: bool = True,
 ):
     started = datetime.now(timezone.utc)
     log("=" * 60)
-    log("🚀 Starting Pattern Discovery Pipeline")
-    log(f"   Days={days} | TF={tf}m | MinSample={min_sample} | MinPrecision={min_precision}")
+    log("🚀 Starting Pattern Discovery Pipeline v2 (lift-based thresholds)")
+    log(f"   Days={days} | TF={tf}m | MinSample={min_sample} | MinLift={min_lift}x | MinPrecision(floor)={min_precision}")
     log("=" * 60)
 
     # Clear debug log
@@ -276,8 +278,11 @@ async def run_pipeline(
 
     miner = RuleMiner(
         min_sample_size  = min_sample,
+        min_lift         = min_lift,
         min_precision    = min_precision,
-        max_fpr          = 0.20,
+        max_fpr          = 0.30,
+        wf_min_lift      = max(1.2, min_lift * 0.6),
+        wf_max_std       = 0.25,
         max_conditions   = 6,
         top_k            = 20,
     )
@@ -312,6 +317,7 @@ async def run_pipeline(
         "tf":              tf,
         "window":          window,
         "min_sample":      min_sample,
+        "min_lift":        min_lift,
         "min_precision":   min_precision,
         "total_samples":   len(samples),
         "n_pumps":         n_pumps,
@@ -433,8 +439,10 @@ def parse_args():
                         help=f"Entry timeframe in minutes (default {DEFAULT_TF})")
     parser.add_argument("--min-sample",  type=int,   default=DEFAULT_MIN_SAMPLE,
                         help=f"Min triggers for a rule (default {DEFAULT_MIN_SAMPLE})")
+    parser.add_argument("--min-lift",      type=float, default=DEFAULT_MIN_LIFT,
+                        help=f"Min lift = precision/base_rate (default {DEFAULT_MIN_LIFT}x, e.g. 2.0 means 2x better than random)")
     parser.add_argument("--min-precision", type=float, default=DEFAULT_MIN_PRECISION,
-                        help=f"Min precision (default {DEFAULT_MIN_PRECISION})")
+                        help=f"Min precision absolute floor (default {DEFAULT_MIN_PRECISION}, overridden by --min-lift)")
     parser.add_argument("--window",      type=int,   default=30,
                         help="Feature window size in bars (default 30)")
     parser.add_argument("--no-telegram", action="store_true",
@@ -455,6 +463,7 @@ if __name__ == "__main__":
         days          = args.days,
         tf            = args.tf,
         min_sample    = args.min_sample,
+        min_lift      = args.min_lift,
         min_precision = args.min_precision,
         window        = args.window,
         send_telegram = not args.no_telegram,

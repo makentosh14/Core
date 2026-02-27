@@ -156,38 +156,82 @@ async def update_stop_loss_order(symbol: str, trade: Dict, new_sl: float) -> boo
 async def check_and_restore_sl(symbol: str, trade: Dict) -> bool:
     """Check if SL order exists and restore if missing"""
     try:
-        # Get open orders for symbol
         orders_response = await signed_request("GET", "/v5/order/realtime", {
             "category": "linear",
             "symbol": symbol
         })
-        
+
         if orders_response.get("retCode") != 0:
             log(f"❌ Failed to get orders for {symbol}: {orders_response.get('retMsg')}")
             return False
-        
+
         orders = orders_response.get("result", {}).get("list", [])
-        
-        # Check if SL order exists
-        sl_exists = any(
-            order.get("orderType") == "Stop" and order.get("reduceOnly") 
-            for order in orders
-        )
-        
-        if sl_exists:
-            log(f"✅ SL order exists for {symbol}")
-            return True
-        
-        # SL missing - restore it
-        log(f"⚠️ SL order missing for {symbol} - restoring...")
-        
-        sl_price = trade.get("sl") or trade.get("original_sl")
-        if not sl_price:
-            log(f"❌ No SL price found for {symbol}")
+
+        # FIX: Bybit stop orders have orderType="Market" and stopOrderType="Stop"
+        # NOT orderType="Stop". Also reduceOnly can be False on stop orders.
+        # Check all three possible SL indicators:
+        def is_sl_order(order):
+            stop_order_type = order.get("stopOrderType", "")
+            order_type = order.get("orderType", "")
+            trigger_price = order.get("triggerPrice", "")
+            reduce_only = order.get("reduceOnly", False)
+            close_on_trigger = order.get("closeOnTrigger", False)
+
+            # Pattern 1: stopOrderType is "Stop" or "StopLoss" (most common)
+            if stop_order_type in ("Stop", "StopLoss") and trigger_price:
+                return True
+
+            # Pattern 2: orderType is "Stop" and has a triggerPrice
+            if order_type == "Stop" and trigger_price:
+                return True
+
+            # Pattern 3: closeOnTrigger flag (trailing stops placed by Bybit)
+            if close_on_trigger and trigger_price:
+                return True
+
             return False
-        
-        return await update_stop_loss_order(symbol, trade, sl_price)
-        
+
+        sl_order = next((o for o in orders if is_sl_order(o)), None)
+
+        if sl_order:
+            # Update trade dict with real SL data from exchange
+            trigger_price = float(sl_order.get("triggerPrice", 0))
+            order_id = sl_order.get("orderId")
+
+            if trigger_price > 0:
+                trade["sl"] = trigger_price
+                trade["sl_order_id"] = order_id
+                log(f"✅ SL order confirmed for {symbol} @ {trigger_price} (order: {order_id})")
+            return True
+
+        # --- SL is genuinely missing — try to restore ---
+        log(f"⚠️ SL order missing for {symbol} - restoring...")
+
+        # Try multiple sources for the SL price
+        sl_price = (
+            trade.get("sl") or
+            trade.get("original_sl") or
+            trade.get("breakeven_sl") or
+            trade.get("trailing_sl")
+        )
+
+        if not sl_price:
+            # Last resort: calculate SL from entry price using default percentage
+            entry_price = float(trade.get("entry_price", 0))
+            direction = trade.get("direction", "").lower()
+            if entry_price > 0 and direction:
+                sl_pct = 1.0  # Default 1% SL
+                if direction == "long":
+                    sl_price = round(entry_price * (1 - sl_pct / 100), 6)
+                else:
+                    sl_price = round(entry_price * (1 + sl_pct / 100), 6)
+                log(f"⚠️ {symbol}: No SL price found in trade dict, calculated default: {sl_price}")
+            else:
+                log(f"❌ No SL price found for {symbol} and cannot calculate default")
+                return False
+
+        return await update_stop_loss_order(symbol, trade, float(sl_price))
+
     except Exception as e:
         log(f"❌ Error checking/restoring SL for {symbol}: {e}", level="ERROR")
         return False

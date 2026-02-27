@@ -965,11 +965,15 @@ def debug_live_link():
 
 
 # === ENTRY POINT ===
+# === ENTRY POINT ===
 if __name__ == "__main__":
+    import sys
+    import platform
+
     log("🔧 DEBUG: CORE STRATEGY main.py is running...")
     log(f"🔍 CORE STRATEGY thresholds - Scalp: {MIN_SCALP_SCORE}, Intraday: {MIN_INTRADAY_SCORE}, Swing: {MIN_SWING_SCORE}")
     log(f"🔒 CORE STRATEGY limits - Max positions: {MAX_CORE_POSITIONS}, Scalp: {MAX_SCALP_POSITIONS}, Intraday: {MAX_INTRADAY_POSITIONS}, Swing: {MAX_SWING_POSITIONS}")
-    
+
     async def restart_forever():
         """Core strategy restart mechanism with crash recovery"""
         while True:
@@ -981,7 +985,38 @@ if __name__ == "__main__":
                 await send_error_to_telegram(err_msg)
                 await asyncio.sleep(10)
 
-    asyncio.run(restart_forever())
+    # ── Windows fix ──────────────────────────────────────────────────────────
+    # On Windows, asyncio defaults to ProactorEventLoop which raises
+    # "ConnectionResetError: [WinError 10054]" as a noisy but harmless
+    # callback error whenever a remote host closes a TCP connection abruptly.
+    # Switching to SelectorEventLoop eliminates this entirely.
+    # On Linux/Mac this block is skipped — no change in behaviour there.
+    if platform.system() == "Windows":
+        # 1. Use SelectorEventLoop instead of ProactorEventLoop
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+        # 2. Suppress the residual WinError 10054 that may still slip through
+        #    during shutdown of existing connections on startup.
+        def _silence_connection_reset(loop, context):
+            exception = context.get("exception")
+            if isinstance(exception, ConnectionResetError):
+                # Harmless: remote host closed the connection — ignore silently
+                return
+            # All other exceptions go through the default handler
+            loop.default_exception_handler(context)
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.set_exception_handler(_silence_connection_reset)
+
+        try:
+            loop.run_until_complete(restart_forever())
+        finally:
+            loop.close()
+    else:
+        # Linux / Mac — run normally, no changes needed
+        asyncio.run(restart_forever())
+
 
 
 

@@ -111,7 +111,7 @@ def _bybit_position_to_trade(p: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
 
     trade = {
         "symbol": symbol,
-        "trade_type": p.get("tradeType") or "Intraday",
+        "trade_type": p.get("tradeType") or "CoreIntraday",
         "direction": direction,
         "entry_price": entry,
         "qty": qty,

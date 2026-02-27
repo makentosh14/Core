@@ -386,6 +386,8 @@ async def handle_reentry_logic(symbol: str, trade: Dict, current_price: float):
 async def monitor_active_trades():
     """Main monitoring loop for active trades"""
     log("🔍 Starting monitor_active_trades() loop...")
+
+    await asyncio.sleep(5)
     
     # Import unified exit manager once at start
     try:

@@ -318,27 +318,41 @@ def determine_core_strategy_type(score: float, confidence: float, trend_strength
 def check_strategy_position_limits(strategy_type: str) -> bool:
     """Check strategy-specific position limits"""
     try:
-        strategy_counts = {"CoreScalp": 0, "CoreIntraday": 0, "CoreSwing": 0}
+        # FIX: Count ALL non-exited positions for the global cap,
+        # regardless of trade_type (covers recovered/synced trades too)
+        total_active = sum(1 for trade in active_trades.values() if not trade.get("exited", False))
         
+        if total_active >= MAX_CORE_POSITIONS:
+            log(f"🚫 Global position limit reached: {total_active}/{MAX_CORE_POSITIONS}")
+            return False
+
+        # Per-strategy limits (only count Core-typed trades for sub-limits)
+        strategy_counts = {"CoreScalp": 0, "CoreIntraday": 0, "CoreSwing": 0}
+
         for trade in active_trades.values():
             if not trade.get("exited", False):
                 trade_type = trade.get("trade_type", "")
+                # Normalize: "Scalp" → "CoreScalp", "Intraday" → "CoreIntraday" etc.
                 if trade_type in strategy_counts:
                     strategy_counts[trade_type] += 1
-        
-        # Check limits
+                elif f"Core{trade_type}" in strategy_counts:
+                    strategy_counts[f"Core{trade_type}"] += 1
+
         if strategy_type == "CoreScalp" and strategy_counts["CoreScalp"] >= MAX_SCALP_POSITIONS:
+            log(f"🚫 Scalp position limit reached: {strategy_counts['CoreScalp']}/{MAX_SCALP_POSITIONS}")
             return False
         elif strategy_type == "CoreIntraday" and strategy_counts["CoreIntraday"] >= MAX_INTRADAY_POSITIONS:
+            log(f"🚫 Intraday position limit reached: {strategy_counts['CoreIntraday']}/{MAX_INTRADAY_POSITIONS}")
             return False
         elif strategy_type == "CoreSwing" and strategy_counts["CoreSwing"] >= MAX_SWING_POSITIONS:
+            log(f"🚫 Swing position limit reached: {strategy_counts['CoreSwing']}/{MAX_SWING_POSITIONS}")
             return False
-        
+
         return True
-        
+
     except Exception as e:
         log(f"❌ Error checking position limits: {e}", level="ERROR")
-        return False
+        return False  # FIX: Return False on error (was True — was allowing trades on exception!)
 
 
 def validate_momentum_alignment(core_candles: Dict, direction: str) -> bool:
@@ -968,5 +982,6 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+
 
 

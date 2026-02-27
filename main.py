@@ -228,69 +228,60 @@ async def calculate_core_score(symbol: str, core_candles: Dict, trend_context: D
 
 
 def determine_core_direction(core_candles: Dict, trend_context: Dict) -> Optional[str]:
-    """Determine trade direction based on candles and trend context"""
     try:
-        # Get scores for direction determination
         tf_scores = {}
-        
         for tf, candles in core_candles.items():
             if not candles or len(candles) < 10:
                 continue
-                
-            # Simple price momentum check
             recent_close = float(candles[-1]['close'])
             earlier_close = float(candles[-10]['close'])
-            
             change_pct = ((recent_close - earlier_close) / earlier_close) * 100
             tf_scores[tf] = change_pct
-        
+
         if not tf_scores:
             return None
-        
-        # Determine direction based on majority
+
         positive_count = sum(1 for v in tf_scores.values() if v > 0)
         negative_count = sum(1 for v in tf_scores.values() if v < 0)
         total_change = sum(tf_scores.values())
-        
-        # Consider trend context
         btc_trend = trend_context.get("btc_trend", "neutral")
-        
+
         if positive_count > negative_count and total_change > 0:
             return "Long"
         elif negative_count > positive_count and total_change < 0:
-            # Only allow shorts in bearish BTC trend
-            if btc_trend in ["bearish", "strong_bearish"]:
+            # FIX: Allow shorts in neutral, ranging, bearish, or strong_bearish
+            # Previously only allowed in "bearish" and "strong_bearish"
+            if btc_trend not in ["bullish", "strong_bullish"]:
                 return "Short"
             return None
-        
+
         return None
-        
+
     except Exception as e:
         log(f"❌ Error determining direction: {e}", level="ERROR")
         return None
 
 
 async def validate_core_conditions(symbol: str, core_candles: Dict, direction: str, trend_context: Dict) -> bool:
-    """Validate that core strategy conditions are met"""
     try:
-        # Check BTC trend alignment for longs
         btc_trend = trend_context.get("btc_trend", "neutral")
-        
+
         if direction == "Long" and btc_trend in ["bearish", "strong_bearish"]:
             log(f"⚠️ {symbol}: Long rejected - BTC trend is {btc_trend}")
             return False
-        
+
         if direction == "Short" and btc_trend in ["bullish", "strong_bullish"]:
             log(f"⚠️ {symbol}: Short rejected - BTC trend is {btc_trend}")
             return False
-        
-        # Validate short signals more strictly
+
+        # FIX: validate_short_signal is async — must be awaited.
+        # Also pass correct arguments matching the async signature in trend_filters.py
         if direction == "Short":
-            if not validate_short_signal(symbol, core_candles, trend_context):
+            is_valid = await validate_short_signal(symbol, core_candles)
+            if not is_valid:
                 log(f"⚠️ {symbol}: Short signal validation failed")
                 return False
-        
-        # Check for sufficient volume
+
         for tf, candles in core_candles.items():
             if candles and len(candles) >= 5:
                 volumes = [float(c.get('volume', 0)) for c in candles[-5:]]
@@ -299,9 +290,9 @@ async def validate_core_conditions(symbol: str, core_candles: Dict, direction: s
                     log(f"⚠️ {symbol}: Low volume on {tf}m timeframe")
                     return False
                 break
-        
+
         return True
-        
+
     except Exception as e:
         log(f"❌ Error validating conditions for {symbol}: {e}", level="ERROR")
         return False
@@ -975,3 +966,4 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+

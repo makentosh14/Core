@@ -802,6 +802,8 @@ async def core_monitor_loop():
     DO NOT add exit logic here to avoid duplication!
     """
     log("🔍 Starting core_monitor_loop (status logging only)...")
+
+    await asyncio.sleep(15)
     
     while True:
         try:
@@ -966,4 +968,5 @@ if __name__ == "__main__":
                 await asyncio.sleep(10)
 
     asyncio.run(restart_forever())
+
 

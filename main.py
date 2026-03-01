@@ -36,6 +36,17 @@ from monitor import (
     periodic_trade_sync, monitor_active_trades, get_current_price
 )
 from trade_lock_manager import trade_lock_manager
+from scalp_hunter import (
+    evaluate_scalp_setup,
+    update_watchlist,
+    update_btc_state,
+    register_scalp_trade,
+    record_scalp_result,
+    format_scalp_signal,
+    format_scalp_exit_message,
+    SCALP_CONFIG,
+    _btc_state,
+)
 
 log(f"🔍 main.py - Core Strategy Only - imported active_trades id: {id(active_trades)}")
 
@@ -72,6 +83,14 @@ MAX_CORE_POSITIONS = 3       # Maximum 3 concurrent positions
 MAX_SCALP_POSITIONS = 2      # Maximum 2 scalp positions
 MAX_INTRADAY_POSITIONS = 1   # Maximum 1 intraday position
 MAX_SWING_POSITIONS = 1      # Maximum 1 swing position
+
+# <<< SCALP HUNTER >>> — Scalp Hunter Configuration
+SCALP_HUNTER_ENABLED = True          # Master switch
+SCALP_HUNTER_SIGNALS_ONLY = True    # True = Telegram only, no exchange orders
+SCALP_RISK_PCT = 0.01                # 1% account risk per scalp trade
+MAX_SCALP_CONCURRENT = 2            # Max concurrent scalp positions
+scalp_signal_cooldown: Dict[str, float] = {}   # Per-symbol cooldown tracker
+SCALP_COOLDOWN_SECONDS = 300         # 5 minutes between signals per symbol
 
 
 def fix_live_candles_structure(candles_data):
@@ -527,6 +546,170 @@ async def get_core_confirmations(symbol: str, core_candles: Dict, direction: str
     
     return confirmations
 
+# <<< SCALP HUNTER >>> — New async function, add to main.py
+
+async def scalp_hunter_scan(symbols: List[str], trend_context: Dict) -> None:
+    """
+    1% Scalp Hunter scan loop.
+    Called from core_strategy_scan() after core strategy processing.
+    Evaluates every symbol for compression → expansion setups.
+    """
+    if not SCALP_HUNTER_ENABLED:
+        return
+
+    cfg = SCALP_CONFIG
+
+    # ── Update BTC state first (needed for alt filtering) ──────────
+    btc_candles_1m = list(live_candles.get("BTCUSDT", {}).get("1", []))
+    btc_candles_5m = list(live_candles.get("BTCUSDT", {}).get("5", []))
+    if btc_candles_1m:
+        update_btc_state(btc_candles_1m, btc_candles_5m)
+
+    # Count current scalp positions
+    from monitor import active_trades
+    current_scalp_count = sum(
+        1 for t in active_trades.values()
+        if not t.get("exited", False) and t.get("trade_type") == "ScalpHunter"
+    )
+    if current_scalp_count >= MAX_SCALP_CONCURRENT:
+        log(f"⛔ SCALP HUNTER: Max concurrent positions reached ({current_scalp_count})")
+        return
+
+    processed = 0
+    for symbol in symbols:
+        try:
+            # ── Get candles ────────────────────────────────────────
+            sym_candles = live_candles.get(symbol, {})
+            candles_by_tf = {
+                tf: list(sym_candles.get(tf, []))
+                for tf in ["1", "3", "5"]
+                if sym_candles.get(tf)
+            }
+            if not candles_by_tf:
+                continue
+
+            # Need at least one TF with sufficient candles
+            has_enough = any(len(v) >= 30 for v in candles_by_tf.values())
+            if not has_enough:
+                continue
+
+            # Get current price
+            primary_tf = "1" if "1" in candles_by_tf else list(candles_by_tf.keys())[0]
+            last_candle = candles_by_tf[primary_tf][-1]
+            current_price = float(last_candle.get("close", 0))
+            if not current_price:
+                continue
+
+            # ── Signal cooldown check ──────────────────────────────
+            last_signal_ts = scalp_signal_cooldown.get(symbol, 0)
+            if time.time() - last_signal_ts < SCALP_COOLDOWN_SECONDS:
+                continue
+
+            # ── Skip if already in active trade ───────────────────
+            if symbol in active_trades and not active_trades[symbol].get("exited", False):
+                continue
+
+            # ── Evaluate scalp setup ───────────────────────────────
+            result = evaluate_scalp_setup(symbol, candles_by_tf, current_price)
+
+            # ── Update watchlist ───────────────────────────────────
+            result = update_watchlist(symbol, result)
+
+            # ── Process result ─────────────────────────────────────
+            if result["should_trade"]:
+                await _fire_scalp_signal(symbol, result, candles_by_tf, current_price)
+                # Yield after signal to avoid blocking
+                await asyncio.sleep(0.1)
+
+            processed += 1
+            # Small yield every 20 symbols to stay async-friendly
+            if processed % 20 == 0:
+                await asyncio.sleep(0.01)
+
+        except Exception as e:
+            log(f"⚠️ SCALP HUNTER: Error evaluating {symbol}: {e}", level="WARN")
+            continue
+
+
+async def _fire_scalp_signal(
+    symbol: str,
+    result: Dict,
+    candles_by_tf: Dict,
+    current_price: float,
+) -> None:
+    """
+    Send Telegram signal and optionally place order for scalp setup.
+    """
+    direction = result["direction"]
+    sl_price = result["sl_price"]
+    tp1_price = result["tp1_price"]
+    sl_pct = result["sl_pct"]
+    tp1_pct = result["tp1_pct"]
+    score = result["score"]
+    confidence = result["confidence"]
+    reasons = result["reasons"]
+    details = result["details"]
+
+    # ── Duplicate guard ──────────────────────────────────────────
+    if is_duplicate_signal(symbol):
+        log(f"🔁 SCALP HUNTER: Duplicate signal blocked for {symbol}")
+        return
+
+    log(f"🎯 SCALP HUNTER SIGNAL: {symbol} {direction.upper()} | Score={score} | Conf={confidence:.1f}%")
+
+    # ── Format and send Telegram message ─────────────────────────
+    msg = format_scalp_signal(
+        symbol=symbol,
+        direction=direction,
+        entry_price=current_price,
+        sl_price=sl_price,
+        tp1_price=tp1_price,
+        sl_pct=sl_pct,
+        tp1_pct=tp1_pct,
+        score=score,
+        confidence=confidence,
+        reasons=reasons,
+        details=details,
+        btc_state=_btc_state.get("trend", "unknown"),
+    )
+    await send_telegram_message(msg)
+
+    # Record signal to prevent duplicates + cooldown
+    log_signal(symbol)
+    scalp_signal_cooldown[symbol] = time.time()
+
+    # ── Place trade (if not signals-only mode) ────────────────────
+    if not SCALP_HUNTER_SIGNALS_ONLY:
+        signal_data = {
+            "symbol": symbol,
+            "direction": direction.capitalize(),
+            "strategy": "ScalpHunter",
+            "trade_type": "ScalpHunter",
+            "score": float(score),
+            "confidence": confidence,
+            "regime": "scalp_hunter",
+            "sl_price": sl_price,
+            "tp1_price": tp1_price,
+            "sl_pct": sl_pct,
+            "tp1_pct": tp1_pct,
+            "trailing_pct": 0.5,          # 0.5% trailing after TP1
+            "tp1_partial_close": SCALP_CONFIG["tp1_partial_close"],
+            "leverage": SCALP_CONFIG["leverage"],
+            "candles": candles_by_tf,
+            "is_scalp_hunter": True,       # Flag for executor
+        }
+
+        trade_result = await execute_trade_if_valid(signal_data, max_risk=SCALP_RISK_PCT)
+
+        if trade_result and trade_result.get("success"):
+            register_scalp_trade(symbol)
+            track_signal(symbol, float(score))
+            log(f"✅ SCALP HUNTER: Trade placed for {symbol}")
+        else:
+            log(f"❌ SCALP HUNTER: Trade placement failed for {symbol}")
+    else:
+        log(f"📡 SCALP HUNTER: Signal-only mode — no order placed for {symbol}")
+
 
 async def core_strategy_scan(symbols: List[str], trend_context: Dict):
     """
@@ -694,6 +877,10 @@ async def core_strategy_scan(symbols: List[str], trend_context: Dict):
                 continue
 
         log(f"📊 CORE STRATEGY SUMMARY: {scanned_count} scanned, {core_signals_found} quality signals")
+
+                         # <<< SCALP HUNTER >>> — Run scalp hunter scan after core strategy
+                if SCALP_HUNTER_ENABLED:
+                    await scalp_hunter_scan(symbols, trend_context)
 
     except Exception as e:
         log(f"❌ CORE STRATEGY: Error in scan: {e}", level="ERROR")
@@ -1016,6 +1203,7 @@ if __name__ == "__main__":
     else:
         # Linux / Mac — run normally, no changes needed
         asyncio.run(restart_forever())
+
 
 
 

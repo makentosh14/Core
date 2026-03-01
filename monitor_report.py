@@ -17,6 +17,7 @@ daily_stats = {
 
 # Thresholds for each trade type
 SCORE_EXIT_THRESHOLDS = {
+    "ScalpHunter": {"min_score": 3, "cycles": 2},
     "Scalp": {"min_score": 6, "cycles": 2},
     "Intraday": {"min_score": 6, "cycles": 3},
     "Swing": {"min_score": 5, "cycles": 4}

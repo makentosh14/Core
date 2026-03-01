@@ -9,6 +9,12 @@ import asyncio
 import json
 import time
 import traceback
+try:
+    from scalp_hunter import check_scalp_early_exit, format_scalp_exit_message
+    SCALP_HUNTER_AVAILABLE = True
+except ImportError:
+    SCALP_HUNTER_AVAILABLE = False
+    log("⚠️ scalp_hunter.py not found — scalp exit monitoring disabled")
 from datetime import datetime
 from typing import Dict, Any, Optional
 from logger import log, write_log
@@ -462,6 +468,83 @@ async def monitor_active_trades():
                     
                     # Check and restore SL if missing
                     await check_and_restore_sl(symbol, trade)
+
+                                        # <<< SCALP HUNTER >>> — Scalp-specific early exit check
+                    if (SCALP_HUNTER_AVAILABLE
+                            and trade.get("trade_type") == "ScalpHunter"
+                            and not trade.get("exited", False)):
+                        
+                        # Get current candles for volume + pattern check
+                        current_candles = []
+                        try:
+                            from websocket_candles import live_candles as lc
+                            sym_data = lc.get(symbol, {})
+                            # Prefer 1m, fallback to 3m
+                            current_candles = list(sym_data.get("1", sym_data.get("3", [])))
+                        except Exception:
+                            pass
+                        
+                        direction = trade.get("direction", "").lower()
+                        current_score = trade.get("score", 0)
+                        
+                        should_early_exit, exit_reason = check_scalp_early_exit(
+                            symbol=symbol,
+                            current_score=current_score,
+                            current_candles=current_candles,
+                            direction=direction,
+                        )
+                        
+                        if should_early_exit:
+                            log(f"⚡ SCALP EARLY EXIT: {symbol} — {exit_reason}")
+                            
+                            # Calculate P&L
+                            entry_price = float(trade.get("entry_price", 0))
+                            if entry_price > 0:
+                                if direction == "long":
+                                    pnl_pct = ((current_price - entry_price) / entry_price) * 100
+                                else:
+                                    pnl_pct = ((entry_price - current_price) / entry_price) * 100
+                            else:
+                                pnl_pct = 0.0
+                            
+                            # Send Telegram notification
+                            try:
+                                from telegram_bot import send_telegram_message
+                                from scalp_hunter import format_scalp_exit_message
+                                exit_msg = format_scalp_exit_message(
+                                    symbol=symbol,
+                                    direction=direction,
+                                    exit_reason=exit_reason,
+                                    pnl_pct=pnl_pct,
+                                    entry_price=entry_price,
+                                    exit_price=current_price,
+                                )
+                                await send_telegram_message(exit_msg)
+                            except Exception as tg_e:
+                                log(f"⚠️ Could not send scalp exit TG: {tg_e}", level="WARN")
+                            
+                            # Record result for loss streak tracking
+                            try:
+                                from scalp_hunter import record_scalp_result
+                                record_scalp_result(symbol, win=pnl_pct > 0)
+                            except Exception:
+                                pass
+                            
+                            # Mark as exited and close position on exchange
+                            trade["exited"] = True
+                            trade["exit_reason"] = f"ScalpHunterEarlyExit: {exit_reason}"
+                            trade["exit_price"] = current_price
+                            
+                            # Close via unified exit manager
+                            if exit_manager_available:
+                                try:
+                                    await process_trade_exits(symbol, trade, current_price, force_exit=True)
+                                except TypeError:
+                                    # If force_exit not supported, fall through to normal exit
+                                    await process_trade_exits(symbol, trade, current_price)
+                            
+                            recent_exits[symbol] = time.time()
+                            continue  # Skip to next trade
                     
                     # Use unified exit manager for all exit logic
                     if exit_manager_available:

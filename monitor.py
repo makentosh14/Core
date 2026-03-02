@@ -9,17 +9,18 @@ import asyncio
 import json
 import time
 import traceback
+from datetime import datetime
+from typing import Dict, Any, Optional
+from logger import log, write_log
+from bybit_api import signed_request
+from error_handler import send_telegram_message, send_error_to_telegram
+
 try:
     from scalp_hunter import check_scalp_early_exit, format_scalp_exit_message
     SCALP_HUNTER_AVAILABLE = True
 except ImportError:
     SCALP_HUNTER_AVAILABLE = False
     log("⚠️ scalp_hunter.py not found — scalp exit monitoring disabled")
-from datetime import datetime
-from typing import Dict, Any, Optional
-from logger import log, write_log
-from bybit_api import signed_request
-from error_handler import send_telegram_message, send_error_to_telegram
 
 # Configuration
 ENABLE_AUTO_REENTRY = False

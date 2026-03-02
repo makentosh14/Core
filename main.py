@@ -330,19 +330,17 @@ async def validate_core_conditions(symbol: str, core_candles: Dict, direction: s
 
 
 def determine_core_strategy_type(score: float, confidence: float, trend_strength: float) -> Optional[str]:
+    """Determine core strategy type with strict requirements"""
     try:
         if score >= MIN_SWING_SCORE and confidence >= 80 and trend_strength >= 0.7:
             return "CoreSwing"
-        elif score >= MIN_INTRADAY_SCORE and confidence >= 70 and trend_strength >= 0.35:  # was 0.5 → 0.35
+        elif score >= MIN_INTRADAY_SCORE and confidence >= 70 and trend_strength >= 0.35:
             return "CoreIntraday"
-        elif score >= MIN_SCALP_SCORE and confidence >= 65:  # was 70 → 65
+        elif score >= MIN_SCALP_SCORE and confidence >= 65:
             return "CoreScalp"
         else:
-            log(f"⛔ Strategy type blocked: score={score:.1f} conf={confidence:.0f} strength={trend_strength:.2f}")
+            log(f"⛔ No strategy type: score={score:.1f} conf={confidence:.0f} strength={trend_strength:.2f}")
             return None
-    except Exception as e:
-        log(f"❌ Error determining strategy type: {e}", level="ERROR")
-        return None
 
 
 def check_strategy_position_limits(strategy_type: str) -> bool:
@@ -536,8 +534,8 @@ async def get_core_confirmations(symbol: str, core_candles: Dict, direction: str
             confirmations.append("volume_breakout")
         
         # 3. Trend strength confirmation
-        trend_strength = trend_context.get("trend_strength", 0.5)
-        if trend_strength > 0.6:
+        trend_strength = trend_context.get("strength", trend_context.get("trend_strength", 0.5))
+        if trend_strength > 0.5:  # lowered from 0.6 → 0.5 to match real downtrend strength ~0.37
             confirmations.append("strong_trend")
         
         # 4. Price level confirmation
@@ -740,9 +738,10 @@ async def core_strategy_scan(symbols: List[str], trend_context: Dict):
             log(f"🚫 CORE STRATEGY: Max positions reached ({current_positions}/{MAX_CORE_POSITIONS})")
             return
 
-        # Get market trend strength
-        trend_strength = trend_context.get("trend_strength", 0.5)
+        # Enhanced system stores under "strength", legacy uses "trend_strength"
+        trend_strength = trend_context.get("strength", trend_context.get("trend_strength", 0.5))
         trend_direction = trend_context.get("trend", "neutral")
+        log(f"📊 Trend strength resolved: {trend_strength:.2f} (raw keys: strength={trend_context.get('strength', 'N/A')}, trend_strength={trend_context.get('trend_strength', 'N/A')})")
         # Don't block trading on WAIT_AND_SEE unless opportunity is very low
         strategy_rec = trend_context.get("recommendations", {}).get("primary_strategy", "")
         opportunity = trend_context.get("opportunity_score", 0.5)
@@ -1227,6 +1226,7 @@ if __name__ == "__main__":
     else:
         # Linux / Mac — run normally, no changes needed
         asyncio.run(restart_forever())
+
 
 
 

@@ -879,8 +879,8 @@ async def core_strategy_scan(symbols: List[str], trend_context: Dict):
         log(f"📊 CORE STRATEGY SUMMARY: {scanned_count} scanned, {core_signals_found} quality signals")
 
                          # <<< SCALP HUNTER >>> — Run scalp hunter scan after core strategy
-                if SCALP_HUNTER_ENABLED:
-                    await scalp_hunter_scan(symbols, trend_context)
+        if SCALP_HUNTER_ENABLED:
+            await scalp_hunter_scan(symbols, trend_context)
 
     except Exception as e:
         log(f"❌ CORE STRATEGY: Error in scan: {e}", level="ERROR")
@@ -1203,6 +1203,7 @@ if __name__ == "__main__":
     else:
         # Linux / Mac — run normally, no changes needed
         asyncio.run(restart_forever())
+
 
 
 

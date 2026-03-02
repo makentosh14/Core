@@ -270,12 +270,8 @@ async def execute_trade_core(
         
         # Step 1: Set leverage if needed
         if category == "linear":
-            await set_leverage(symbol, DEFAULT_LEVERAGE, category)
-
-                # <<< SCALP HUNTER >>> — Override leverage for scalp hunter trades
-        if is_scalp_hunter:
-            leverage = signal_data.get("leverage", 20)   # ScalpHunter always uses 20x
-            log(f"🎯 SCALP HUNTER trade: {symbol} — applying {leverage}x leverage")
+            lev = signal_data.get("leverage", DEFAULT_LEVERAGE) if is_scalp_hunter else DEFAULT_LEVERAGE
+            await set_leverage(symbol, lev, category)
         
         # Step 2: Execute market order
         side = "Buy" if direction.lower() == "long" else "Sell"

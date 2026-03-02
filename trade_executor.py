@@ -121,6 +121,7 @@ async def execute_trade_if_valid(signal_data, max_risk=0.06):
         score = signal_data.get("score", 0)
         confidence = signal_data.get("confidence", 60)
         regime = signal_data.get("regime", "trending")
+        is_scalp_hunter = signal_data.get("is_scalp_hunter", False)
 
         from monitor import active_trades
         if symbol in active_trades and not active_trades[symbol].get("exited", False):
@@ -211,6 +212,15 @@ async def execute_trade_core(
             candles_by_tf = signal_data.get("candles", {})
             
             # Calculate SL/TP using the imported function
+
+        if signal_data.get("is_scalp_hunter") and signal_data.get("sl_price"):
+            sl_price = float(signal_data["sl_price"])
+            tp1_price = float(signal_data["tp1_price"])
+            sl_pct = float(signal_data.get("sl_pct", 0.005))
+            tp1_pct = float(signal_data.get("tp1_pct", 0.009))
+            trailing_pct = float(signal_data.get("trailing_pct", 0.5))
+            log(f"✅ SCALP HUNTER: Using pre-calculated SL={sl_price:.6f} TP1={tp1_price:.6f}")
+        else:
             sl_tp_result = calculate_dynamic_sl_tp(
                 candles_by_tf=candles_by_tf,
                 price=current_price,
@@ -261,6 +271,11 @@ async def execute_trade_core(
         # Step 1: Set leverage if needed
         if category == "linear":
             await set_leverage(symbol, DEFAULT_LEVERAGE, category)
+
+                # <<< SCALP HUNTER >>> — Override leverage for scalp hunter trades
+        if is_scalp_hunter:
+            leverage = signal_data.get("leverage", 20)   # ScalpHunter always uses 20x
+            log(f"🎯 SCALP HUNTER trade: {symbol} — applying {leverage}x leverage")
         
         # Step 2: Execute market order
         side = "Buy" if direction.lower() == "long" else "Sell"
@@ -305,6 +320,9 @@ async def execute_trade_core(
             tp_price=tp1_price,
             market_type=category
         )
+
+        if signal_data.get("is_scalp_hunter"):
+            tp1_partial_close = signal_data.get("tp1_partial_close", 0.5)
         
         if not tp1_order_id:
             log(f"⚠️ TP1 placement failed for {symbol}", level="WARN")
@@ -513,3 +531,4 @@ def calculate_actual_risk_percentage(entry_price, sl_price, qty, account_balance
 # - TP1 order placement
 # - Monitor registration
 # - Execution logging
+

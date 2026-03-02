@@ -88,10 +88,12 @@ async def log_trade_result(symbol, result: str, profit: float):
     daily_stats["profit"] += profit
 
     # <<< SCALP HUNTER >>> — Record result for loss streak tracking
-    if trade.get("trade_type") == "ScalpHunter":
+    try:
         from scalp_hunter import record_scalp_result
-        win = pnl_pct > 0
+        win = (result == "win")
         record_scalp_result(symbol, win)
+    except Exception:
+        pass
 
 # Sends the daily Telegram summary at 23:00 Amsterdam time
 async def send_daily_report():

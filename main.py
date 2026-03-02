@@ -213,14 +213,11 @@ async def filter_core_symbols(symbols: List[str]) -> List[str]:
 
 
 async def calculate_core_score(symbol: str, core_candles: Dict, trend_context: Dict) -> float:
-    """Calculate core strategy score with momentum bonus"""
     try:
-        # Get base score from score_symbol
         base_score, tf_scores, trade_type, indicator_scores, used_indicators = score_symbol(
             symbol, core_candles, trend_context
         )
-        
-        # Calculate momentum bonus
+
         momentum_bonus = 0
         for tf, candles in core_candles.items():
             if candles and len(candles) >= 10:
@@ -228,58 +225,74 @@ async def calculate_core_score(symbol: str, core_candles: Dict, trend_context: D
                 if has_momentum and strength > 0.6:
                     momentum_bonus = strength * 1.5
                     break
-        
-        # Add regime bonus
+
         regime = trend_context.get("regime", "unknown")
+        trend = trend_context.get("trend", "neutral")
+
         if regime == "transitional":
             regime_bonus = 2.0
         elif regime == "trending":
             regime_bonus = 1.5
+        elif trend in ("downtrend", "uptrend"):
+            # Trending market even if regime tag missing — give partial bonus
+            regime_bonus = 1.2
         else:
             regime_bonus = 1.0
-        
+
         final_score = base_score + momentum_bonus + regime_bonus
         return final_score
-        
+
     except Exception as e:
         log(f"❌ Error calculating score for {symbol}: {e}", level="ERROR")
-        return 6.0  # Default score
+        return 6.0
 
 
 def determine_core_direction(core_candles: Dict, trend_context: Dict) -> Optional[str]:
     try:
         tf_scores = {}
         for tf, candles in core_candles.items():
-            if not candles or len(candles) < 10:
+            if not candles or len(candles) < 5:
                 continue
-            recent_close = float(candles[-1]['close'])
-            earlier_close = float(candles[-10]['close'])
-            change_pct = ((recent_close - earlier_close) / earlier_close) * 100
-            tf_scores[tf] = change_pct
+            closes = [float(c.get('close', 0)) for c in candles[-10:]]
+            if len(closes) < 5:
+                continue
+            # Simple momentum: compare last close to 5-candle average
+            avg = sum(closes[:-1]) / len(closes[:-1])
+            tf_scores[tf] = closes[-1] - avg
 
         if not tf_scores:
             return None
 
-        positive_count = sum(1 for v in tf_scores.values() if v > 0)
-        negative_count = sum(1 for v in tf_scores.values() if v < 0)
-        total_change = sum(tf_scores.values())
-        btc_trend = trend_context.get("btc_trend", "neutral")
+        # Count bullish vs bearish timeframes
+        bullish = sum(1 for v in tf_scores.values() if v > 0)
+        bearish = sum(1 for v in tf_scores.values() if v < 0)
+        total = len(tf_scores)
 
-        if positive_count > negative_count and total_change > 0:
-            return "Long"
-        elif negative_count > positive_count and total_change < 0:
-            # FIX: Allow shorts in neutral, ranging, bearish, or strong_bearish
-            # Previously only allowed in "bearish" and "strong_bearish"
-            if btc_trend not in ["bullish", "strong_bullish"]:
+        trend = trend_context.get("trend", "neutral")
+
+        # In downtrend: allow Short signals
+        if trend in ("downtrend", "weak_downtrend"):
+            if bearish >= total // 2:
                 return "Short"
+            return None  # Don't force Long against downtrend
+
+        # In uptrend: allow Long signals
+        if trend in ("uptrend", "weak_uptrend"):
+            if bullish >= total // 2:
+                return "Long"
             return None
+
+        # Neutral/choppy: need majority agreement
+        if bullish > bearish and bullish >= 2:
+            return "Long"
+        elif bearish > bullish and bearish >= 2:
+            return "Short"
 
         return None
 
     except Exception as e:
-        log(f"❌ Error determining direction: {e}", level="ERROR")
+        log(f"❌ Error determining direction for core: {e}", level="ERROR")
         return None
-
 
 async def validate_core_conditions(symbol: str, core_candles: Dict, direction: str, trend_context: Dict) -> bool:
     try:
@@ -318,17 +331,17 @@ async def validate_core_conditions(symbol: str, core_candles: Dict, direction: s
 
 
 def determine_core_strategy_type(score: float, confidence: float, trend_strength: float) -> Optional[str]:
-    """Determine core strategy type with strict requirements"""
     try:
         if score >= MIN_SWING_SCORE and confidence >= 80 and trend_strength >= 0.7:
             return "CoreSwing"
         elif score >= MIN_INTRADAY_SCORE and confidence >= 75 and trend_strength >= 0.5:
             return "CoreIntraday"
-        elif score >= MIN_SCALP_SCORE and confidence >= 70:
+        elif score >= MIN_SCALP_SCORE and confidence >= 65:  # was 70 → lowered to 65
             return "CoreScalp"
         else:
+            log(f"⛔ No strategy type: score={score:.1f} conf={confidence:.0f} strength={trend_strength:.2f}")
             return None
-            
+
     except Exception as e:
         log(f"❌ Error determining strategy type: {e}", level="ERROR")
         return None
@@ -783,6 +796,11 @@ async def core_strategy_scan(symbols: List[str], trend_context: Dict):
 
                     # Must have at least 1m and 5m to proceed
                     if not all(tf in core_candles for tf in ('1', '5')):
+                        # --- ADD THIS ---
+                        missing = [tf for tf in ('1', '5') if tf not in core_candles]
+                        available = {tf: len(list(src.get(tf, []))) for tf in ['1', '5', '15']}
+                        log(f"⏭️ {symbol}: Missing TFs {missing} | candle counts: {available}", level="DEBUG")
+                        # ----------------
                         trade_lock_manager.release_trade_lock(symbol, False)
                         continue
 
@@ -1203,6 +1221,7 @@ if __name__ == "__main__":
     else:
         # Linux / Mac — run normally, no changes needed
         asyncio.run(restart_forever())
+
 
 
 

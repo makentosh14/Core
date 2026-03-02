@@ -523,6 +523,34 @@ def detect_momentum_acceleration(core_candles: Dict, direction: str) -> bool:
     except Exception as e:
         return False
 
+def _calculate_momentum_and_regime_bonus(symbol: str, core_candles: Dict, trend_context: Dict) -> float:
+    """Calculate momentum + regime bonus without re-running score_symbol"""
+    try:
+        momentum_bonus = 0
+        for tf, candles in core_candles.items():
+            if candles and len(candles) >= 10:
+                has_momentum, direction, strength = detect_momentum_strength(candles)
+                if has_momentum and strength > 0.6:
+                    momentum_bonus = strength * 1.5
+                    break
+
+        regime = trend_context.get("regime", "unknown").lower()
+        trend = trend_context.get("trend", "neutral")
+
+        if regime == "transitional":
+            regime_bonus = 2.0
+        elif regime in ("trending", "strong_trending"):
+            regime_bonus = 1.5
+        elif trend in ("downtrend", "uptrend"):
+            regime_bonus = 1.2
+        else:
+            regime_bonus = 1.0
+
+        return momentum_bonus + regime_bonus
+
+    except Exception:
+        return 1.0
+
 
 async def get_core_confirmations(symbol: str, core_candles: Dict, direction: str, trend_context: Dict) -> List[str]:
     """Get confirmations specific to core strategy"""
@@ -818,14 +846,12 @@ async def core_strategy_scan(symbols: List[str], trend_context: Dict):
                     # === CORE STRATEGY SIGNAL GENERATION ===
                     
                     # 1. Get full scoring data
+                    # 1. Get full scoring data ONCE
                     score_result = score_symbol(symbol, core_candles, trend_context)
                     score, tf_scores, trade_type, indicator_scores, used_indicators = score_result
 
-                    # 2. Calculate core score with momentum bonus
-                    core_score = await calculate_core_score(symbol, core_candles, trend_context)
-                    if core_score < MIN_SCALP_SCORE:
-                        trade_lock_manager.release_trade_lock(symbol, False)
-                        continue
+                    # 2. Calculate core score using already-computed base score
+                    core_score = score + _calculate_momentum_and_regime_bonus(symbol, core_candles, trend_context)
 
                     # 3. Determine direction
                     direction = determine_core_direction(core_candles, trend_context)
@@ -1230,6 +1256,7 @@ if __name__ == "__main__":
     else:
         # Linux / Mac — run normally, no changes needed
         asyncio.run(restart_forever())
+
 
 
 

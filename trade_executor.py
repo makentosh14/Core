@@ -270,7 +270,7 @@ async def execute_trade_core(
         
         # Step 1: Set leverage if needed
         if category == "linear":
-            lev = signal_data.get("leverage", DEFAULT_LEVERAGE) if is_scalp_hunter else DEFAULT_LEVERAGE
+            lev = signal_data.get("leverage", DEFAULT_LEVERAGE) if signal_data.get("is_scalp_hunter") else DEFAULT_LEVERAGE
             await set_leverage(symbol, lev, category)
         
         # Step 2: Execute market order
@@ -527,4 +527,5 @@ def calculate_actual_risk_percentage(entry_price, sl_price, qty, account_balance
 # - TP1 order placement
 # - Monitor registration
 # - Execution logging
+
 

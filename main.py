@@ -342,6 +342,10 @@ def determine_core_strategy_type(score: float, confidence: float, trend_strength
             log(f"⛔ No strategy type: score={score:.1f} conf={confidence:.0f} strength={trend_strength:.2f}")
             return None
 
+    except Exception as e:
+        log(f"❌ Error determining strategy type: {e}", level="ERROR")
+        return None
+
 
 def check_strategy_position_limits(strategy_type: str) -> bool:
     """Check strategy-specific position limits"""
@@ -1226,6 +1230,7 @@ if __name__ == "__main__":
     else:
         # Linux / Mac — run normally, no changes needed
         asyncio.run(restart_forever())
+
 
 
 

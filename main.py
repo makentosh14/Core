@@ -226,15 +226,14 @@ async def calculate_core_score(symbol: str, core_candles: Dict, trend_context: D
                     momentum_bonus = strength * 1.5
                     break
 
-        regime = trend_context.get("regime", "unknown")
-        trend = trend_context.get("trend", "neutral")
+        # Enhanced system uses lowercase regime value
+        regime = trend_context.get("regime", "unknown").lower()
 
         if regime == "transitional":
             regime_bonus = 2.0
-        elif regime == "trending":
+        elif regime in ("trending", "strong_trending"):
             regime_bonus = 1.5
-        elif trend in ("downtrend", "uptrend"):
-            # Trending market even if regime tag missing — give partial bonus
+        elif regime in ("range_bound", "consolidating"):
             regime_bonus = 1.2
         else:
             regime_bonus = 1.0
@@ -334,14 +333,13 @@ def determine_core_strategy_type(score: float, confidence: float, trend_strength
     try:
         if score >= MIN_SWING_SCORE and confidence >= 80 and trend_strength >= 0.7:
             return "CoreSwing"
-        elif score >= MIN_INTRADAY_SCORE and confidence >= 75 and trend_strength >= 0.5:
+        elif score >= MIN_INTRADAY_SCORE and confidence >= 70 and trend_strength >= 0.35:  # was 0.5 → 0.35
             return "CoreIntraday"
-        elif score >= MIN_SCALP_SCORE and confidence >= 65:  # was 70 → lowered to 65
+        elif score >= MIN_SCALP_SCORE and confidence >= 65:  # was 70 → 65
             return "CoreScalp"
         else:
-            log(f"⛔ No strategy type: score={score:.1f} conf={confidence:.0f} strength={trend_strength:.2f}")
+            log(f"⛔ Strategy type blocked: score={score:.1f} conf={confidence:.0f} strength={trend_strength:.2f}")
             return None
-
     except Exception as e:
         log(f"❌ Error determining strategy type: {e}", level="ERROR")
         return None
@@ -468,7 +466,7 @@ def validate_trend_coherence(core_candles: Dict, direction: str, trend_context: 
     """Validate trend coherence across indicators"""
     try:
         btc_trend = trend_context.get("btc_trend", "neutral")
-        trend_strength = trend_context.get("trend_strength", 0.5)
+        trend_strength = trend_context.get("strength", trend_context.get("trend_strength", 0.5))
         
         # Strong trend alignment gives bonus
         if direction == "Long" and btc_trend in ["bullish", "strong_bullish"]:
@@ -745,7 +743,15 @@ async def core_strategy_scan(symbols: List[str], trend_context: Dict):
         # Get market trend strength
         trend_strength = trend_context.get("trend_strength", 0.5)
         trend_direction = trend_context.get("trend", "neutral")
-        
+        # Don't block trading on WAIT_AND_SEE unless opportunity is very low
+        strategy_rec = trend_context.get("recommendations", {}).get("primary_strategy", "")
+        opportunity = trend_context.get("opportunity_score", 0.5)
+
+        if strategy_rec == "wait_and_see" and opportunity < 0.35:
+            log(f"⏸️ CORE STRATEGY: Skipping scan — WAIT_AND_SEE with low opportunity ({opportunity:.2f})")
+            return
+
+        log(f"📈 Strategy recommendation: {strategy_rec} | Opportunity: {opportunity:.2f}")
         log(f"🔍 CORE STRATEGY: Scanning {len(symbols)} symbols | Trend: {trend_direction} ({trend_strength:.2f})")
 
         scanned_count = 0
@@ -1221,6 +1227,7 @@ if __name__ == "__main__":
     else:
         # Linux / Mac — run normally, no changes needed
         asyncio.run(restart_forever())
+
 
 
 

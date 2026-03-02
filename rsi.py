@@ -449,7 +449,7 @@ def calculate_stoch_rsi(candles: List[Dict], rsi_period: int = 14,
     Calculate Stochastic RSI - wrapper for backward compatibility
     """
     try:
-        rsi_values = calculate_rsi_wilder(candles, rsi_period, "")
+        rsi_values = calculate_rsi_wilder(candles, rsi_period, "stoch_internal")
         if not rsi_values or len(rsi_values) < stoch_period:
             return None
             
@@ -539,5 +539,6 @@ def calculate_rsi_with_bands(candles: List[Dict], period: int = 14,
     Legacy function - use calculate_rsi_with_scoring for new implementations
     """
     return calculate_rsi_with_scoring(candles, period, "", overbought, oversold)
+
 
 

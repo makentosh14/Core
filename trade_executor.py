@@ -196,6 +196,21 @@ async def execute_trade_core(
         # Get execution parameters from signal_data
         category = signal_data.get("market_type", get_symbol_category(symbol))
         trade_type = signal_data.get("trade_type", "Intraday")
+
+        # Get entry price — try multiple keys
+        entry_price = signal_data.get("entry_price") or signal_data.get("price")
+
+        # If still missing, fetch live price
+        if not entry_price or float(entry_price) == 0:
+            entry_price = await get_symbol_price(symbol)
+            log(f"⚠️ {symbol}: entry_price was missing, fetched live: {entry_price}")
+
+        # Final guard — abort if no valid price
+        if not entry_price or float(entry_price) == 0:
+            log(f"❌ {symbol}: Cannot execute — no valid entry price", level="ERROR")
+            return None
+
+        entry_price = float(entry_price)
         
         # Get prices from signal_data or calculate them
         current_price = signal_data.get("price", 0)
@@ -527,5 +542,6 @@ def calculate_actual_risk_percentage(entry_price, sl_price, qty, account_balance
 # - TP1 order placement
 # - Monitor registration
 # - Execution logging
+
 
 

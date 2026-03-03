@@ -557,7 +557,7 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
                     indicator_scores[f"{tf_label}_ema"] = -WEIGHTS["ema"]
 
                 # Enhanced RSI Analysis
-                rsi_data = calculate_rsi_with_bands(candles)
+                rsi_data = calculate_rsi_with_bands(candles, symbol=f"{symbol}_{tf_label}")
                 if rsi_data:
                     rsi_signal, rsi_strength = get_balanced_rsi_signal(
                         rsi_data, market_trend=market_context.get("btc_trend", "neutral")
@@ -704,7 +704,7 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
                 # SWING INDICATORS (30m, 60m, 240m)
 
                 # Enhanced RSI Analysis
-                rsi_data = calculate_rsi_with_bands(candles)
+                rsi_data = calculate_rsi_with_bands(candles, symbol=f"{symbol}_{tf_label}")
                 if rsi_data:
                     rsi_signal, rsi_strength = get_balanced_rsi_signal(
                         rsi_data, market_trend=market_context.get("btc_trend", "neutral")

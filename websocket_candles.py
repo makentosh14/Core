@@ -13,15 +13,19 @@ SUPPORTED_INTERVALS = ['1', '3', '5', '15', '30', '60', '240']
 RECONNECT_DELAY = 5
 
 async def handle_stream(url, symbols, category, interval):
+    # SAFETY: freeze interval as a local constant immediately
+    _interval = str(interval)  # <-- add this line as the very first line of the function
+    
     while True:
         try:
             async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
-                args = [f"kline.{interval}.{symbol}" for symbol in symbols if symbol_category_map.get(symbol) == category]
+                args = [f"kline.{_interval}.{symbol}" for symbol in symbols 
+                        if symbol_category_map.get(symbol) == category]
                 if not args:
                     return
 
                 await ws.send(json.dumps({"op": "subscribe", "args": args}))
-                log(f"📡 Subscribed to {len(args)} {category.upper()} @ {interval}m")
+                log(f"📡 Subscribed to {len(args)} {category.upper()} @ {_interval}m")
 
                 while True:
                     try:
@@ -33,6 +37,11 @@ async def handle_stream(url, symbols, category, interval):
                         interval_from_topic = topic.split(".")[1] if topic else None
 
                         if not symbol or "data" not in data or not interval_from_topic:
+                            continue
+
+                        # SAFETY: only process messages that match our subscribed interval
+                        if interval_from_topic != _interval:
+                            log(f"⚠️ Interval mismatch: got {interval_from_topic} on {_interval} stream, skipping", level="WARNING")
                             continue
 
                         candles = data["data"]
@@ -64,29 +73,27 @@ async def handle_stream(url, symbols, category, interval):
                         log(f"📈 {symbol} [{category}] @{interval_from_topic} updated | total: {len(live_candles[symbol][interval_from_topic])}")
 
                     except asyncio.TimeoutError:
-                        warning = f"⚠️ No data for {category} {interval}m in 30s — reconnecting..."
+                        warning = f"⚠️ No data for {category} {_interval}m in 30s — reconnecting..."
                         log(warning, level="WARNING")
                         await send_error_to_telegram(warning)
                         break
-
                     except websockets.exceptions.ConnectionClosedError as e:
-                        warning = f"❌ WebSocket closed unexpectedly for {category} {interval}m: {e}"
+                        warning = f"❌ WebSocket closed unexpectedly for {category} {_interval}m: {e}"
                         log(warning, level="ERROR")
                         await send_error_to_telegram(warning)
                         break
-
                     except Exception as e:
-                        error = f"❌ WebSocket stream error in {category} {interval}m: {e}"
+                        error = f"❌ WebSocket stream error in {category} {_interval}m: {e}"
                         log(error, level="ERROR")
                         await send_error_to_telegram(error)
                         break
 
         except Exception as e:
-            error = f"❌ Connection failed for {category} {interval}m: {e}"
+            error = f"❌ Connection failed for {category} {_interval}m: {e}"
             log(error, level="ERROR")
             await send_error_to_telegram(error)
 
-        reconnect_msg = f"🔁 Reconnecting {category} {interval}m in {RECONNECT_DELAY}s..."
+        reconnect_msg = f"🔁 Reconnecting {category} {_interval}m in {RECONNECT_DELAY}s..."
         log(reconnect_msg)
         await send_error_to_telegram(reconnect_msg)
         await asyncio.sleep(RECONNECT_DELAY)

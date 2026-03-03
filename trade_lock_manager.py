@@ -87,7 +87,6 @@ class TradeLockManager:
                 await lock.acquire()
                 # Mark as pending
                 self.pending_trades.add(symbol)
-                self.signal_cooldowns[symbol] = time.time()
                 log(f"🔒 Trade lock acquired for {symbol}")
                 return True
             else:
@@ -106,6 +105,7 @@ class TradeLockManager:
             self.pending_trades.discard(symbol)
             self.confirmed_trades.add(symbol)
             self.failed_attempts[symbol] = 0
+            self.signal_cooldowns[symbol] = time.time()
             log(f"✅ Trade confirmed for {symbol}")
         else:
             # Failed attempt

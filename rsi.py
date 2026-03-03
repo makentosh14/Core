@@ -533,12 +533,14 @@ def calculate_rsi(candles: List[Dict], period: int = 14) -> Optional[List[float]
     """
     return calculate_rsi_wilder(candles, period, "")
 
-def calculate_rsi_with_bands(candles: List[Dict], period: int = 14, 
-                            overbought: float = 70, oversold: float = 30) -> Optional[Dict]:
+def calculate_rsi_with_bands(candles: List[Dict], period: int = 14,
+                            overbought: float = 70, oversold: float = 30,
+                            symbol: str = "") -> Optional[Dict]:
     """
     Legacy function - use calculate_rsi_with_scoring for new implementations
     """
-    return calculate_rsi_with_scoring(candles, period, "", overbought, oversold)
+    return calculate_rsi_with_scoring(candles, period, symbol, overbought, oversold)
+
 
 
 

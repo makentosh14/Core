@@ -593,7 +593,7 @@ def is_bearish_kicker(prev: Dict, curr: Dict) -> bool:
 
 # Main pattern detection function
 
-def detect_pattern(candles: List[Dict], use_cache: bool = True) -> Optional[str]:
+def detect_pattern(candles: List[Dict], use_cache: bool = True, trend_context_override=None) -> Optional[str]:
     """
     Enhanced pattern detection with caching and all patterns
     

@@ -868,7 +868,6 @@ async def core_strategy_scan(symbols: List[str], trend_context: Dict):
 
                     # === CORE STRATEGY SIGNAL GENERATION ===
                     
-                    # 1. Get full scoring data
                     # 1. Get full scoring data ONCE
                     score_result = score_symbol(symbol, core_candles, trend_context)
                     score, tf_scores, trade_type, indicator_scores, used_indicators = score_result
@@ -879,39 +878,46 @@ async def core_strategy_scan(symbols: List[str], trend_context: Dict):
                     # 3. Determine direction
                     direction = determine_core_direction(core_candles, trend_context)
                     if not direction:
+                        log(f"⏭️ {symbol}: No direction determined", level="DEBUG")
                         trade_lock_manager.release_trade_lock(symbol, False)
                         continue
 
                     # 4. Calculate confidence
                     confidence = calculate_confidence(score, tf_scores, trend_context, trade_type)
                     if confidence < 60:
+                        log(f"⏭️ {symbol}: Confidence too low ({confidence}%)", level="DEBUG")
                         trade_lock_manager.release_trade_lock(symbol, False)
                         continue
 
                     # 5. Validate core strategy conditions
                     if not await validate_core_conditions(symbol, core_candles, direction, trend_context):
+                        log(f"⏭️ {symbol}: Core conditions not met", level="DEBUG")
                         trade_lock_manager.release_trade_lock(symbol, False)
                         continue
 
                     # 6. Determine strategy type
                     strategy_type = determine_core_strategy_type(core_score, confidence, trend_strength)
                     if not strategy_type:
+                        log(f"⏭️ {symbol}: No strategy type (score={core_score:.1f}, conf={confidence}%)", level="DEBUG")
                         trade_lock_manager.release_trade_lock(symbol, False)
                         continue
 
                     # 7. Check strategy-specific position limits
                     if not check_strategy_position_limits(strategy_type):
+                        log(f"⏭️ {symbol}: Position limits reached for {strategy_type}", level="DEBUG")
                         trade_lock_manager.release_trade_lock(symbol, False)
                         continue
 
                     # 8. Get confirmations
                     confirmations = await get_core_confirmations(symbol, core_candles, direction, trend_context)
                     if len(confirmations) < 2:
+                        log(f"⏭️ {symbol}: Insufficient confirmations ({len(confirmations)}): {confirmations}", level="DEBUG")
                         trade_lock_manager.release_trade_lock(symbol, False)
                         continue
 
                     # 9. Check for duplicate signal
                     if is_duplicate_signal(symbol):
+                        log(f"⏭️ {symbol}: Duplicate signal blocked", level="DEBUG")
                         trade_lock_manager.release_trade_lock(symbol, False)
                         continue
 
@@ -1297,6 +1303,7 @@ if __name__ == "__main__":
     else:
         # Linux / Mac — run normally, no changes needed
         asyncio.run(restart_forever())
+
 
 
 

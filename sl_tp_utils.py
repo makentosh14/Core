@@ -189,7 +189,20 @@ def calculate_dynamic_sl_tp(candles_by_tf, entry_price, trade_type, direction, s
     Calculate FIXED SL/TP percentages as requested
     Returns exactly what you specified for Scalp and Intraday trades
     """
+    # Guard against None or zero entry price
+    if not entry_price or entry_price == 0:
+        log(f"❌ calculate_dynamic_sl_tp: entry_price is None or 0, cannot calculate SL/TP", level="ERROR")
+        return None
 
+    try:
+        entry_price = float(entry_price)
+    except (TypeError, ValueError):
+        log(f"❌ calculate_dynamic_sl_tp: entry_price '{entry_price}' is not a valid number", level="ERROR")
+        return None
+
+    if not direction:
+        log(f"❌ calculate_dynamic_sl_tp: direction is None or empty", level="ERROR")
+        return None
     # Normalize trade type
     trade_type = str(trade_type).strip().title()
     if trade_type not in ["Scalp", "Intraday", "Swing"]:

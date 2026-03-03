@@ -621,7 +621,7 @@ def detect_pattern(candles: List[Dict], use_cache: bool = True) -> Optional[str]
         c1, c2, c3 = candles[-3], candles[-2], candles[-1]
         
         # Determine trend context for better pattern reliability
-        trend_context = _determine_trend_context(candles)
+        trend_context = trend_context_override if trend_context_override is not None else _determine_trend_context(candles)
         
         # Three-candle patterns (check first as they're often stronger)
         if is_morning_star(c1, c2, c3):
@@ -767,6 +767,8 @@ def detect_pattern_cluster(candles: List[Dict], lookback: int = 10) -> List[Dict
         return []
     
     patterns = []
+
+    trend_context = _determine_trend_context(candles)
     
     # Check for patterns at different positions
     for i in range(len(candles) - lookback, len(candles) - 2):

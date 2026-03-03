@@ -28,7 +28,7 @@ async def handle_stream(url, symbols, category, interval):
                 log(f"📡 Subscribed to {len(args)} {category.upper()} @ {_interval}m")
 
                 # ── SEED: fill deques with REST history on every connect ──────
-                seed_symbols = [s for s in symbols if symbol_category_map.get(s) == category]
+                seed_symbols = [s for s in symbols if symbol_category_map.get(s, 'linear') == category]
                 for sym in seed_symbols:
                     try:
                         if len(live_candles[sym][_interval]) < 50:

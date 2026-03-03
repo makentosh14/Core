@@ -590,6 +590,7 @@ async def monitor_active_trades():
 
 async def periodic_trade_sync():
     """Periodic trade sync function - called from main.py"""
+    global active_trades
     while True:
         try:
             # Only run after bot has been running for 30 seconds

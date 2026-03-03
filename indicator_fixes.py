@@ -65,24 +65,21 @@ def analyze_volume_direction(candles):
         return "neutral", 0
 
 def get_balanced_rsi_signal(rsi_data, market_trend="neutral"):
-    """Fixed RSI signal with balanced thresholds"""
     if not rsi_data:
         return "neutral", 0
     
     rsi = rsi_data.get('rsi', 50)
     
-    # Use dynamic thresholds based on trend
     if market_trend == "uptrend":
-        overbought = 80  # Higher threshold in uptrend
+        overbought = 80
         oversold = 35
     elif market_trend == "downtrend":
         overbought = 65
-        oversold = 20   # Lower threshold in downtrend
-    else:  # neutral/ranging
+        oversold = 20
+    else:
         overbought = 70
         oversold = 30
-    
-    # Calculate signal strength
+
     if rsi > overbought:
         strength = min((rsi - overbought) / 20, 1.0)
         return "sell", strength
@@ -90,8 +87,21 @@ def get_balanced_rsi_signal(rsi_data, market_trend="neutral"):
         strength = min((oversold - rsi) / 20, 1.0)
         return "buy", strength
     else:
-        # Neutral zone - look at RSI momentum
-        if rsi > 50:
-            return "neutral_bullish", (rsi - 50) / 50
+        # BEFORE: flat neutral bias
+        # if rsi > 50: return "neutral_bullish", (rsi - 50) / 50
+        # else: return "neutral_bearish", (50 - rsi) / 50
+
+        # AFTER: scale by proximity to oversold/overbought
+        proximity_to_oversold = (oversold + 10 - rsi) / 10  # 0→1 as RSI drops toward oversold+10
+        proximity_to_overbought = (rsi - (overbought - 10)) / 10  # 0→1 as RSI rises toward overbought-10
+
+        if proximity_to_oversold > 0.5:  # RSI within 5 pts of oversold
+            strength = round(proximity_to_oversold * 0.6, 2)  # max 0.6 — not a full signal but meaningful
+            return "buy", strength
+        elif proximity_to_overbought > 0.5:
+            strength = round(proximity_to_overbought * 0.6, 2)
+            return "sell", strength
+        elif rsi > 50:
+            return "neutral_bullish", round((rsi - 50) / 50, 2)
         else:
-            return "neutral_bearish", (50 - rsi) / 50
+            return "neutral_bearish", round((50 - rsi) / 50, 2)

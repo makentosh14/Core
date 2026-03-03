@@ -758,6 +758,13 @@ async def core_strategy_scan(symbols: List[str], trend_context: Dict):
     Only the most reliable signals with strict quality filters.
     """
     source = fix_live_candles_structure(live_candles)
+
+    from scanner import symbol_category_map
+
+    # At top of core_strategy_scan, before the symbol loop:
+    for sym in symbols:
+        if sym not in symbol_category_map:
+            symbol_category_map[sym] = 'linear'
     
     try:
         if not symbols or len(symbols) == 0:
@@ -1290,6 +1297,7 @@ if __name__ == "__main__":
     else:
         # Linux / Mac — run normally, no changes needed
         asyncio.run(restart_forever())
+
 
 
 

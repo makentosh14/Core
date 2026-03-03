@@ -58,3 +58,10 @@ async def fetch_symbols():
         log(error_msg)
         await send_error_to_telegram(error_msg)
         return []
+
+async def ensure_symbol_mapped(symbol: str, category: str = 'linear'):
+    """Add symbol to category map if missing — handles new listings."""
+    if symbol not in symbol_category_map:
+        symbol_category_map[symbol] = category
+        log(f"📍 Auto-mapped new symbol: {symbol} → {category}")
+

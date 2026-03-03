@@ -27,6 +27,23 @@ async def handle_stream(url, symbols, category, interval):
                 await ws.send(json.dumps({"op": "subscribe", "args": args}))
                 log(f"📡 Subscribed to {len(args)} {category.upper()} @ {_interval}m")
 
+                # ── SEED: fill deques with REST history on every connect ──────
+                seed_symbols = [s for s in symbols if symbol_category_map.get(s) == category]
+                for sym in seed_symbols:
+                    try:
+                        if len(live_candles[sym][_interval]) < 50:
+                            hist = await fetch_candles_rest(
+                                sym, interval=_interval, limit=100, category=category
+                            )
+                            if hist:
+                                live_candles[sym][_interval].clear()
+                                for c in hist:
+                                    live_candles[sym][_interval].append(c)
+                                log(f"🌱 {sym} [{_interval}m] seeded: {len(hist)} candles")
+                    except Exception as _seed_err:
+                        log(f"⚠️ Seed failed {sym} {_interval}m: {_seed_err}", level="WARNING")
+                # ── END SEED ─────────────────────────────────────────────────
+
                 while True:
                     try:
                         message = await asyncio.wait_for(ws.recv(), timeout=30)

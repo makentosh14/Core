@@ -788,52 +788,52 @@ async def core_strategy_scan(symbols: List[str], trend_context: Dict):
         scanned_count = 0
         core_signals_found = 0
 
-    for symbol in symbols:
-        try:
-            # === DIAGNOSTIC: track why symbols are skipped ===
-            _diag = symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
-
-            # Check if we can process this symbol
-            can_process, reason = await trade_lock_manager.can_process_symbol(symbol)
-            if not can_process:
-                if _diag:
-                    log(f"🔴 DIAG {symbol}: can_process=False | reason={reason}", level="DEBUG")
-                continue
-
-            # Acquire lock
-            if not await trade_lock_manager.acquire_trade_lock(symbol):
-                if _diag:
-                    log(f"🔴 DIAG {symbol}: lock acquire failed", level="DEBUG")
-                continue
-
+        for symbol in symbols:
             try:
-                # Skip if already in active trade
-                if symbol in active_trades and not active_trades[symbol].get("exited", False):
+                # === DIAGNOSTIC: track why symbols are skipped ===
+                _diag = symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+
+                # Check if we can process this symbol
+                can_process, reason = await trade_lock_manager.can_process_symbol(symbol)
+                if not can_process:
                     if _diag:
-                        log(f"🔴 DIAG {symbol}: active trade exists", level="DEBUG")
-                    trade_lock_manager.release_trade_lock(symbol, False)
+                        log(f"🔴 DIAG {symbol}: can_process=False | reason={reason}", level="DEBUG")
                     continue
 
-                # Skip if in cooldown
-                if symbol in signal_cooldown:
-                    time_diff = time.time() - signal_cooldown[symbol]
-                    if time_diff < SIGNAL_COOLDOWN_TIME:
+                # Acquire lock
+                if not await trade_lock_manager.acquire_trade_lock(symbol):
+                    if _diag:
+                        log(f"🔴 DIAG {symbol}: lock acquire failed", level="DEBUG")
+                    continue
+
+                try:
+                    # Skip if already in active trade
+                    if symbol in active_trades and not active_trades[symbol].get("exited", False):
                         if _diag:
-                            log(f"🔴 DIAG {symbol}: signal cooldown {time_diff:.0f}s of {SIGNAL_COOLDOWN_TIME}s", level="DEBUG")
+                            log(f"🔴 DIAG {symbol}: active trade exists", level="DEBUG")
                         trade_lock_manager.release_trade_lock(symbol, False)
                         continue
 
-                # Skip if in recent exit cooldown
-                if symbol in recent_exits:
-                    time_diff = time.time() - recent_exits[symbol]
-                    if time_diff < EXIT_COOLDOWN:
-                        if _diag:
-                            log(f"🔴 DIAG {symbol}: exit cooldown {time_diff:.0f}s of {EXIT_COOLDOWN}s", level="DEBUG")
-                        trade_lock_manager.release_trade_lock(symbol, False)
-                        continue
+                    # Skip if in cooldown
+                    if symbol in signal_cooldown:
+                        time_diff = time.time() - signal_cooldown[symbol]
+                        if time_diff < SIGNAL_COOLDOWN_TIME:
+                            if _diag:
+                                log(f"🔴 DIAG {symbol}: signal cooldown {time_diff:.0f}s of {SIGNAL_COOLDOWN_TIME}s", level="DEBUG")
+                            trade_lock_manager.release_trade_lock(symbol, False)
+                            continue
 
-                if _diag:
-                    log(f"🟢 DIAG {symbol}: passed all pre-candle checks", level="DEBUG")
+                    # Skip if in recent exit cooldown
+                    if symbol in recent_exits:
+                        time_diff = time.time() - recent_exits[symbol]
+                        if time_diff < EXIT_COOLDOWN:
+                            if _diag:
+                                log(f"🔴 DIAG {symbol}: exit cooldown {time_diff:.0f}s of {EXIT_COOLDOWN}s", level="DEBUG")
+                            trade_lock_manager.release_trade_lock(symbol, False)
+                            continue
+
+                    if _diag:
+                        log(f"🟢 DIAG {symbol}: passed all pre-candle checks", level="DEBUG")
 
                     # Get candles for core timeframes
                     core_candles = {}
@@ -1272,6 +1272,7 @@ if __name__ == "__main__":
     else:
         # Linux / Mac — run normally, no changes needed
         asyncio.run(restart_forever())
+
 
 
 

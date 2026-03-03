@@ -269,14 +269,32 @@ def enhanced_pattern_scoring(candles, tf_label, score, indicator_scores, used_in
 
         used_indicators.add(f"pattern_{pattern}")
 
+        # AFTER — filter cluster by direction alignment before applying bonus
         pattern_cluster = detect_pattern_cluster(candles, lookback=10)
         if len(pattern_cluster) >= 2:
-            cluster_bonus = WEIGHTS["pattern_cluster"] * len(pattern_cluster)
-            score += cluster_bonus
-            indicator_scores[f"{tf_label}_pattern_cluster"] = cluster_bonus
-            used_indicators.add("pattern_cluster")
             cluster_patterns = [p['pattern'] for p in pattern_cluster]
-            log(f"📊 Pattern cluster detected on {tf_label}: {cluster_patterns}")
+
+            # Count how many cluster patterns align with Long direction
+            bullish_count = sum(1 for p in cluster_patterns if p in REVERSAL_PATTERNS["bullish"] or p in CONTINUATION_PATTERNS["bullish"])
+            bearish_count = sum(1 for p in cluster_patterns if p in REVERSAL_PATTERNS["bearish"] or p in CONTINUATION_PATTERNS["bearish"])
+
+            aligned_count = bullish_count  # Change to bearish_count for Short scoring
+            # For direction-aware scoring, pass direction into this function or check tf_scores sign
+
+            if bullish_count >= 2:
+                cluster_bonus = WEIGHTS["pattern_cluster"] * bullish_count
+                score += cluster_bonus
+                indicator_scores[f"{tf_label}_pattern_cluster_bullish"] = cluster_bonus
+                used_indicators.add("pattern_cluster")
+                log(f"📊 Bullish pattern cluster on {tf_label}: {cluster_patterns} (+{cluster_bonus:.2f})")
+            elif bearish_count >= 2:
+                cluster_bonus = WEIGHTS["pattern_cluster"] * bearish_count
+                score -= cluster_bonus
+                indicator_scores[f"{tf_label}_pattern_cluster_bearish"] = -cluster_bonus
+                used_indicators.add("pattern_cluster")
+                log(f"📊 Bearish pattern cluster on {tf_label}: {cluster_patterns} (-{cluster_bonus:.2f})")
+            else:
+                log(f"📊 Mixed/neutral pattern cluster on {tf_label}: {cluster_patterns} (no bonus)")
 
     # Scan for all patterns for comprehensive analysis
     all_patterns = get_all_patterns(candles)

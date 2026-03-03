@@ -988,6 +988,22 @@ async def execute_core_trade(
             return {"success": False, "reason": "position_exists"}
 
         # Prepare signal data
+        # Get current price from candles
+        _price = 0.0
+        for _tf in ['1', '5', '15']:
+            if _tf in core_candles and core_candles[_tf]:
+                try:
+                    _price = float(core_candles[_tf][-1].get('close', 0))
+                    if _price > 0:
+                        break
+                except Exception:
+                    continue
+
+        if _price == 0:
+            log(f"❌ {symbol}: Cannot get entry price from candles", level="ERROR")
+            return {"success": False, "reason": "no_price"}
+
+        # Prepare signal data
         signal_data = {
             "symbol": symbol,
             "direction": direction,
@@ -999,7 +1015,9 @@ async def execute_core_trade(
             "risk_adjusted": True,
             "core_strategy": True,
             "candles": core_candles,
-            "trade_type": strategy_type.replace("Core", "")  # "CoreScalp" -> "Scalp"
+            "trade_type": strategy_type.replace("Core", ""),  # "CoreScalp" -> "Scalp"
+            "price": _price,        # current market price
+            "entry_price": _price,  # explicit entry price
         }
 
         log(f"🎯 CORE STRATEGY EXECUTION: {symbol}")
@@ -1272,6 +1290,7 @@ if __name__ == "__main__":
     else:
         # Linux / Mac — run normally, no changes needed
         asyncio.run(restart_forever())
+
 
 
 

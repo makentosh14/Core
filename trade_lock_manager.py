@@ -17,11 +17,13 @@ class TradeLockManager:
         self.confirmed_trades: Set[str] = set()  # Confirmed active trades
         self.signal_cooldowns: Dict[str, float] = {}  # Last signal time
         self.failed_attempts: Dict[str, int] = {}  # Count failed attempts
+        self.failed_attempt_times: Dict[str, float] = {} 
         
         # Configurable timeouts
         self.SIGNAL_COOLDOWN = 3600  # 1 hour between signals
         self.PENDING_TIMEOUT = 60  # 60 seconds for pending trades
         self.MAX_FAILED_ATTEMPTS = 3
+        self.FAILED_ATTEMPT_RESET = 1800
         
     def get_lock(self, symbol: str) -> asyncio.Lock:
         """Get or create a lock for a symbol"""
@@ -56,9 +58,18 @@ class TradeLockManager:
                 remaining = self.SIGNAL_COOLDOWN - time_since_signal
                 return False, f"Cooldown active ({remaining:.0f}s)"
         
-        # Check 5: Too many failed attempts?
+        # Check 5: Too many failed attempts? (auto-reset after FAILED_ATTEMPT_RESET seconds)
         if self.failed_attempts.get(symbol, 0) >= self.MAX_FAILED_ATTEMPTS:
-            return False, "Too many failed attempts"
+            last_fail_time = self.failed_attempt_times.get(symbol, 0)
+            time_since_last_fail = current_time - last_fail_time
+            if time_since_last_fail < self.FAILED_ATTEMPT_RESET:
+                remaining = self.FAILED_ATTEMPT_RESET - time_since_last_fail
+                return False, f"Too many failed attempts (resets in {remaining:.0f}s)"
+            else:
+                # Auto-reset after the window has passed
+                log(f"🔁 Auto-resetting failed attempts for {symbol} after {time_since_last_fail:.0f}s")
+                self.failed_attempts[symbol] = 0
+                self.failed_attempt_times.pop(symbol, None)
         
         # Check 6: Verify with exchange (most reliable)
         if check_exchange:
@@ -111,6 +122,7 @@ class TradeLockManager:
             # Failed attempt
             self.pending_trades.discard(symbol)
             self.failed_attempts[symbol] = self.failed_attempts.get(symbol, 0) + 1
+            self.failed_attempt_times[symbol] = time.time()
             # Remove cooldown on failure to allow retry
             self.signal_cooldowns.pop(symbol, None)
             log(f"❌ Trade failed for {symbol} (attempt {self.failed_attempts[symbol]})")

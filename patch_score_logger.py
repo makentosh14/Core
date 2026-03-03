@@ -126,7 +126,7 @@ if __name__ == "__main__":
 
     # Find and run main's async entry point
     entry = None
-    for name in ["main", "run", "start", "async_main", "bot_main"]:
+    for name in ["run_core_bot", "main", "run", "start", "async_main", "bot_main"]:
         if hasattr(main, name) and asyncio.iscoroutinefunction(getattr(main, name)):
             entry = getattr(main, name)
             print(f"[PATCH] Running main.{name}()", flush=True)

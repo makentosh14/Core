@@ -296,34 +296,35 @@ def determine_core_direction(core_candles: Dict, trend_context: Dict) -> Optiona
 async def validate_core_conditions(symbol: str, core_candles: Dict, direction: str, trend_context: Dict) -> bool:
     try:
         btc_trend = trend_context.get("btc_trend", "neutral")
-
         if direction == "Long" and btc_trend in ["bearish", "strong_bearish"]:
             log(f"⚠️ {symbol}: Long rejected - BTC trend is {btc_trend}")
             return False
-
         if direction == "Short" and btc_trend in ["bullish", "strong_bullish"]:
             log(f"⚠️ {symbol}: Short rejected - BTC trend is {btc_trend}")
             return False
 
-        # FIX: validate_short_signal is async — must be awaited.
-        # Also pass correct arguments matching the async signature in trend_filters.py
         if direction == "Short":
             is_valid = await validate_short_signal(symbol, core_candles)
             if not is_valid:
                 log(f"⚠️ {symbol}: Short signal validation failed")
                 return False
 
-        for tf, candles in core_candles.items():
-            if candles and len(candles) >= 5:
-                volumes = [float(c.get('volume', 0)) for c in candles[-5:]]
+        # Volume check: use 5m as primary TF, fall back to others
+        # Compare volume to its own recent average (relative check) instead of fixed threshold
+        for tf in ['5', '1', '15']:
+            candles = core_candles.get(tf)
+            if candles and len(candles) >= 20:
+                volumes = [float(c.get('volume', 0)) for c in candles[-20:]]
                 avg_vol = sum(volumes) / len(volumes)
-                if avg_vol < 5000:
-                    log(f"⚠️ {symbol}: Low volume on {tf}m timeframe")
+                recent_vol = sum(volumes[-3:]) / 3
+                # Reject only if recent volume is less than 10% of its own average
+                # (dead market, not trading)
+                if avg_vol > 0 and recent_vol < avg_vol * 0.10:
+                    log(f"⚠️ {symbol}: Volume collapsed on {tf}m (recent={recent_vol:.0f} vs avg={avg_vol:.0f})")
                     return False
-                break
+                break  # Only check one TF
 
         return True
-
     except Exception as e:
         log(f"❌ Error validating conditions for {symbol}: {e}", level="ERROR")
         return False
@@ -1303,6 +1304,7 @@ if __name__ == "__main__":
     else:
         # Linux / Mac — run normally, no changes needed
         asyncio.run(restart_forever())
+
 
 
 

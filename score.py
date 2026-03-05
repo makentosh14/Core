@@ -351,10 +351,21 @@ def calculate_confidence(score, tf_scores, market_context, trade_type):
     if not tf_scores:
         return 0
 
-    base_confidence = min(score * 5, 70)
-    tf_alignment = sum(1 for v in tf_scores.values() if v > 0) / max(len(tf_scores), 1)
-    alignment_bonus = tf_alignment * 20
+    # Base: score 8 → 60%, score 10 → 72%, score 14 → 85% cap
+    base_confidence = min(score * 7.5, 85)
 
+    # TF alignment bonus: up to 15 points
+    tf_alignment = sum(1 for v in tf_scores.values() if v > 0) / max(len(tf_scores), 1)
+    alignment_bonus = tf_alignment * 15
+
+    # Trade type bonus
+    type_bonus = 0
+    if trade_type == "Scalp":
+        type_bonus = 5
+    elif trade_type == "Intraday":
+        type_bonus = 3
+
+    # Market context bonus
     market_bonus = 0
     if market_context:
         btc_trend = market_context.get("btc_trend", "neutral")
@@ -363,7 +374,7 @@ def calculate_confidence(score, tf_scores, market_context, trade_type):
         elif btc_trend == "bearish":
             market_bonus = -5
 
-    confidence = base_confidence + alignment_bonus + market_bonus
+    confidence = base_confidence + alignment_bonus + type_bonus + market_bonus
     return min(int(confidence), 100)
 
 

@@ -846,7 +846,7 @@ async def core_strategy_scan(symbols: List[str], trend_context: Dict):
 
                     # Get candles for core timeframes
                     core_candles = {}
-                    src = source.get(symbol, {})
+                    src = fix_live_candles_structure({symbol: live_candles.get(symbol, {})}).get(symbol, {})
                     
                     for tf in ['1', '5', '15']:
                         tf_data = src.get(tf)
@@ -1305,6 +1305,7 @@ if __name__ == "__main__":
     else:
         # Linux / Mac — run normally, no changes needed
         asyncio.run(restart_forever())
+
 
 
 

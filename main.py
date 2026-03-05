@@ -86,7 +86,7 @@ MAX_SWING_POSITIONS = 1      # Maximum 1 swing position
 
 # <<< SCALP HUNTER >>> — Scalp Hunter Configuration
 SCALP_HUNTER_ENABLED = True          # Master switch
-SCALP_HUNTER_SIGNALS_ONLY = True    # True = Telegram only, no exchange orders
+SCALP_HUNTER_SIGNALS_ONLY = False    # True = Telegram only, no exchange orders
 SCALP_RISK_PCT = 0.01                # 1% account risk per scalp trade
 MAX_SCALP_CONCURRENT = 2            # Max concurrent scalp positions
 scalp_signal_cooldown: Dict[str, float] = {}   # Per-symbol cooldown tracker
@@ -1305,6 +1305,7 @@ if __name__ == "__main__":
     else:
         # Linux / Mac — run normally, no changes needed
         asyncio.run(restart_forever())
+
 
 
 

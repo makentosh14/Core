@@ -255,40 +255,41 @@ def determine_core_direction(core_candles: Dict, trend_context: Dict) -> Optiona
             closes = [float(c.get('close', 0)) for c in candles[-10:]]
             if len(closes) < 5:
                 continue
-            # Simple momentum: compare last close to 5-candle average
             avg = sum(closes[:-1]) / len(closes[:-1])
-            tf_scores[tf] = closes[-1] - avg
+            # Use percentage change instead of absolute to work across all price levels
+            pct_diff = (closes[-1] - avg) / avg if avg > 0 else 0
+            tf_scores[tf] = pct_diff
 
         if not tf_scores:
             return None
 
-        # Count bullish vs bearish timeframes
         bullish = sum(1 for v in tf_scores.values() if v > 0)
         bearish = sum(1 for v in tf_scores.values() if v < 0)
         total = len(tf_scores)
-
         trend = trend_context.get("trend", "neutral")
 
-        # In downtrend: allow Short signals
+        # In downtrend: prefer Short
         if trend in ("downtrend", "weak_downtrend"):
             if bearish >= total // 2:
                 return "Short"
-            return None  # Don't force Long against downtrend
+            return None
 
-        # In uptrend: allow Long signals
+        # In uptrend: prefer Long
         if trend in ("uptrend", "weak_uptrend"):
             if bullish >= total // 2:
                 return "Long"
             return None
 
-        # Neutral/choppy: need majority agreement
+        # Neutral: need simple majority (2 out of 3 TFs agree)
         if bullish > bearish and bullish >= 2:
             return "Long"
         elif bearish > bullish and bearish >= 2:
             return "Short"
+        # Tiebreak: use 5m as deciding TF
+        elif total >= 1 and '5' in tf_scores:
+            return "Long" if tf_scores['5'] > 0 else "Short"
 
         return None
-
     except Exception as e:
         log(f"❌ Error determining direction for core: {e}", level="ERROR")
         return None
@@ -1304,6 +1305,7 @@ if __name__ == "__main__":
     else:
         # Linux / Mac — run normally, no changes needed
         asyncio.run(restart_forever())
+
 
 
 

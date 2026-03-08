@@ -192,7 +192,13 @@ def _load_labeled_csv_streaming(
     parquet_path = os.path.join(DATA_DIR, "raw", RESEARCH_PARQUET)
     csv_path     = parquet_path.replace(".parquet", ".csv")
 
-    if os.path.exists(labels_csv):
+    # Prefer sample file if it exists (small, fast, safe for laptops)
+    sample_csv = os.path.join(DATA_DIR, "outcomes", "outcome_labels_sample.csv")
+    if os.path.exists(sample_csv):
+        source       = sample_csv
+        pre_filtered = True
+        print(f"    Using sample file: {os.path.basename(sample_csv)}")
+    elif os.path.exists(labels_csv):
         source       = labels_csv
         pre_filtered = True
     elif os.path.exists(csv_path):

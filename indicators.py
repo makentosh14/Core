@@ -2,12 +2,15 @@
 """
 indicators.py - Complete Indicator Calculation Engine
 =====================================================
-All 30+ indicators with numpy-optimized calculations.
-Each function takes raw OHLCV arrays and returns indicator values.
-Matches your existing bot's indicator logic exactly.
+All 30+ indicators with pure-Python calculations (no numpy dependency).
+Each function takes raw OHLCV data via Candle dataclass.
+
+WARMUP NOTE:
+  analyze_all_indicators() requires at least WARMUP_CANDLES + window candles
+  to produce valid values for all indicators. The slowest indicator is EMA200
+  which needs 200 bars. Callers must pass enough history.
 """
 
-import numpy as np
 import math
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
@@ -29,26 +32,25 @@ class Candle:
 
 def _sma(data: list, period: int) -> list:
     """Simple Moving Average."""
-    if len(data) < period:
-        return []
-    result = []
-    for i in range(len(data)):
-        if i < period - 1:
-            result.append(float("nan"))
-        else:
-            result.append(sum(data[i - period + 1:i + 1]) / period)
+    n = len(data)
+    result = [float("nan")] * n
+    if n < period:
+        return result
+    for i in range(period - 1, n):
+        result[i] = sum(data[i - period + 1 : i + 1]) / period
     return result
 
 
 def _ema(data: list, period: int) -> list:
-    """Exponential Moving Average."""
-    if len(data) < period:
-        return []
-    result = [float("nan")] * len(data)
-    # seed with SMA
+    """Exponential Moving Average (Wilder-style seed = SMA)."""
+    n = len(data)
+    result = [float("nan")] * n
+    if n < period:
+        return result
+    # Seed with SMA
     result[period - 1] = sum(data[:period]) / period
     mult = 2.0 / (period + 1)
-    for i in range(period, len(data)):
+    for i in range(period, n):
         result[i] = (data[i] - result[i - 1]) * mult + result[i - 1]
     return result
 
@@ -59,42 +61,37 @@ def _rsi(closes: list, period: int = 14) -> list:
     result = [float("nan")] * n
     if n < period + 1:
         return result
-    gains = []
-    losses = []
+    gains, losses = [], []
     for i in range(1, n):
         delta = closes[i] - closes[i - 1]
-        gains.append(max(delta, 0))
-        losses.append(abs(min(delta, 0)))
+        gains.append(max(delta, 0.0))
+        losses.append(abs(min(delta, 0.0)))
     avg_gain = sum(gains[:period]) / period
     avg_loss = sum(losses[:period]) / period
-    if avg_loss == 0:
-        result[period] = 100.0
-    else:
-        rs = avg_gain / avg_loss
-        result[period] = 100 - (100 / (1 + rs))
+    def _rs_to_rsi(ag, al):
+        if al == 0:
+            return 100.0
+        return 100 - (100 / (1 + ag / al))
+    result[period] = _rs_to_rsi(avg_gain, avg_loss)
     for i in range(period, len(gains)):
         avg_gain = (avg_gain * (period - 1) + gains[i]) / period
         avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-        if avg_loss == 0:
-            result[i + 1] = 100.0
-        else:
-            rs = avg_gain / avg_loss
-            result[i + 1] = 100 - (100 / (1 + rs))
+        result[i + 1] = _rs_to_rsi(avg_gain, avg_loss)
     return result
 
 
 def _macd(closes: list, fast: int = 12, slow: int = 26, sig: int = 9):
-    """MACD line, signal, histogram."""
+    """MACD line, signal line, histogram."""
+    n = len(closes)
     ema_f = _ema(closes, fast)
     ema_s = _ema(closes, slow)
-    n = len(closes)
     macd_line = [float("nan")] * n
     for i in range(n):
         if not (math.isnan(ema_f[i]) or math.isnan(ema_s[i])):
             macd_line[i] = ema_f[i] - ema_s[i]
-    # signal line = EMA of macd_line
-    valid_macd = [v if not math.isnan(v) else 0 for v in macd_line]
-    signal = _ema(valid_macd, sig)
+    # Signal = EMA of MACD (fill NaN with 0 for EMA seed)
+    ml_filled = [v if not math.isnan(v) else 0.0 for v in macd_line]
+    signal = _ema(ml_filled, sig)
     histogram = [float("nan")] * n
     for i in range(n):
         if not (math.isnan(macd_line[i]) or math.isnan(signal[i])):
@@ -103,14 +100,14 @@ def _macd(closes: list, fast: int = 12, slow: int = 26, sig: int = 9):
 
 
 def _bollinger(closes: list, period: int = 20, std_mult: float = 2.0):
-    """Bollinger Bands: (upper, mid, lower, bandwidth%)."""
+    """Bollinger Bands: upper, mid, lower, bandwidth%."""
     n = len(closes)
     mid = _sma(closes, period)
-    upper = [float("nan")] * n
-    lower = [float("nan")] * n
-    bw = [float("nan")] * n
+    upper  = [float("nan")] * n
+    lower  = [float("nan")] * n
+    bw     = [float("nan")] * n
     for i in range(period - 1, n):
-        window = closes[i - period + 1:i + 1]
+        window = closes[i - period + 1 : i + 1]
         std = (sum((x - mid[i]) ** 2 for x in window) / period) ** 0.5
         upper[i] = mid[i] + std_mult * std
         lower[i] = mid[i] - std_mult * std
@@ -120,18 +117,16 @@ def _bollinger(closes: list, period: int = 20, std_mult: float = 2.0):
 
 
 def _atr(candles: list, period: int = 14) -> list:
-    """Average True Range."""
+    """Average True Range (Wilder smoothed)."""
     n = len(candles)
-    tr = [0.0] * n
-    for i in range(1, n):
-        h = candles[i].high
-        l = candles[i].low
-        pc = candles[i - 1].close
-        tr[i] = max(h - l, abs(h - pc), abs(l - pc))
-    tr[0] = candles[0].high - candles[0].low
     result = [float("nan")] * n
     if n < period:
         return result
+    tr = [0.0] * n
+    tr[0] = candles[0].high - candles[0].low
+    for i in range(1, n):
+        h, l, pc = candles[i].high, candles[i].low, candles[i - 1].close
+        tr[i] = max(h - l, abs(h - pc), abs(l - pc))
     result[period - 1] = sum(tr[:period]) / period
     for i in range(period, n):
         result[i] = (result[i - 1] * (period - 1) + tr[i]) / period
@@ -139,352 +134,83 @@ def _atr(candles: list, period: int = 14) -> list:
 
 
 def _supertrend(candles: list, period: int = 10, mult: float = 3.0):
-    """Supertrend: returns (value, direction) where direction: 1=bull, -1=bear."""
+    """Supertrend indicator. Returns (values, directions) where direction: 1=bull, -1=bear."""
     n = len(candles)
     atr = _atr(candles, period)
-    st_val = [float("nan")] * n
-    st_dir = [0] * n
-    for i in range(period, n):
-        if math.isnan(atr[i]):
-            continue
-        hl2 = (candles[i].high + candles[i].low) / 2
-        up = hl2 + mult * atr[i]
-        dn = hl2 - mult * atr[i]
-        # Adjust bands
-        if i > period and not math.isnan(st_val[i - 1]):
-            prev_up = st_val[i - 1] if st_dir[i - 1] == -1 else up
-            prev_dn = st_val[i - 1] if st_dir[i - 1] == 1 else dn
-            if candles[i - 1].close <= prev_up:
-                up = min(up, prev_up)
-            if candles[i - 1].close >= prev_dn:
-                dn = max(dn, prev_dn)
-        # Direction
-        if candles[i].close > up:
-            st_dir[i] = 1
-            st_val[i] = dn
-        elif candles[i].close < dn:
-            st_dir[i] = -1
-            st_val[i] = up
-        else:
-            st_dir[i] = st_dir[i - 1] if i > period else 0
-            st_val[i] = dn if st_dir[i] == 1 else up
-    return st_val, st_dir
+    direction = [1] * n
+    st = [0.0] * n
+    upper_basic = [0.0] * n
+    lower_basic = [0.0] * n
 
-
-def _stoch_rsi(closes: list, rsi_p: int = 14, stoch_p: int = 14, k_p: int = 3, d_p: int = 3):
-    """Stochastic RSI: returns (k_line, d_line)."""
-    rsi = _rsi(closes, rsi_p)
-    n = len(closes)
-    stoch_rsi_raw = [float("nan")] * n
-    for i in range(stoch_p - 1, n):
-        window = [rsi[j] for j in range(i - stoch_p + 1, i + 1) if not math.isnan(rsi[j])]
-        if len(window) < stoch_p:
-            continue
-        mn = min(window)
-        mx = max(window)
-        if mx - mn > 0:
-            stoch_rsi_raw[i] = ((rsi[i] - mn) / (mx - mn)) * 100
-        else:
-            stoch_rsi_raw[i] = 50.0
-    k_line = _sma_nan(stoch_rsi_raw, k_p)
-    d_line = _sma_nan(k_line, d_p)
-    return k_line, d_line
-
-
-def _sma_nan(data: list, period: int) -> list:
-    """SMA that skips NaN values properly."""
-    n = len(data)
-    result = [float("nan")] * n
-    for i in range(period - 1, n):
-        window = [data[j] for j in range(i - period + 1, i + 1) if not math.isnan(data[j])]
-        if len(window) == period:
-            result[i] = sum(window) / period
-    return result
-
-
-def _williams_r(candles: list, period: int = 14) -> list:
-    """Williams %R."""
-    n = len(candles)
-    result = [float("nan")] * n
-    for i in range(period - 1, n):
-        hh = max(candles[j].high for j in range(i - period + 1, i + 1))
-        ll = min(candles[j].low for j in range(i - period + 1, i + 1))
-        if hh - ll > 0:
-            result[i] = ((hh - candles[i].close) / (hh - ll)) * -100
-    return result
-
-
-def _cci(candles: list, period: int = 20) -> list:
-    """Commodity Channel Index."""
-    n = len(candles)
-    tp = [(c.high + c.low + c.close) / 3 for c in candles]
-    result = [float("nan")] * n
-    for i in range(period - 1, n):
-        window = tp[i - period + 1:i + 1]
-        mean = sum(window) / period
-        md = sum(abs(x - mean) for x in window) / period
-        if md > 0:
-            result[i] = (tp[i] - mean) / (0.015 * md)
-    return result
-
-
-def _mfi(candles: list, period: int = 14) -> list:
-    """Money Flow Index."""
-    n = len(candles)
-    result = [float("nan")] * n
-    if n < period + 1:
-        return result
-    tp = [(c.high + c.low + c.close) / 3 for c in candles]
-    mf = [tp[i] * candles[i].volume for i in range(n)]
-    for i in range(period, n):
-        pos = 0.0
-        neg = 0.0
-        for j in range(i - period + 1, i + 1):
-            if j > 0 and tp[j] > tp[j - 1]:
-                pos += mf[j]
-            elif j > 0 and tp[j] < tp[j - 1]:
-                neg += mf[j]
-        if neg == 0:
-            result[i] = 100.0
-        else:
-            result[i] = 100 - (100 / (1 + pos / neg))
-    return result
-
-
-def _roc(closes: list, period: int = 12) -> list:
-    """Rate of Change."""
-    n = len(closes)
-    result = [float("nan")] * n
-    for i in range(period, n):
-        if closes[i - period] != 0:
-            result[i] = ((closes[i] - closes[i - period]) / closes[i - period]) * 100
-    return result
-
-
-def _momentum(closes: list, period: int = 10) -> list:
-    """Price Momentum."""
-    n = len(closes)
-    result = [float("nan")] * n
-    for i in range(period, n):
-        result[i] = closes[i] - closes[i - period]
-    return result
-
-
-def _obv(candles: list) -> list:
-    """On-Balance Volume."""
-    n = len(candles)
-    result = [0.0] * n
-    for i in range(1, n):
-        if candles[i].close > candles[i - 1].close:
-            result[i] = result[i - 1] + candles[i].volume
-        elif candles[i].close < candles[i - 1].close:
-            result[i] = result[i - 1] - candles[i].volume
-        else:
-            result[i] = result[i - 1]
-    return result
-
-
-def _cmf(candles: list, period: int = 20) -> list:
-    """Chaikin Money Flow."""
-    n = len(candles)
-    result = [float("nan")] * n
-    for i in range(period - 1, n):
-        mfv_sum = 0.0
-        vol_sum = 0.0
-        for j in range(i - period + 1, i + 1):
-            hl = candles[j].high - candles[j].low
-            if hl > 0:
-                mfm = ((candles[j].close - candles[j].low) - (candles[j].high - candles[j].close)) / hl
-            else:
-                mfm = 0
-            mfv_sum += mfm * candles[j].volume
-            vol_sum += candles[j].volume
-        if vol_sum > 0:
-            result[i] = mfv_sum / vol_sum
-    return result
-
-
-def _vwap(candles: list, period: int = 200) -> list:
-    """Rolling VWAP over N candles."""
-    n = len(candles)
-    result = [float("nan")] * n
-    for i in range(min(period, n) - 1, n):
-        start = max(0, i - period + 1)
-        tp_vol = sum(
-            ((candles[j].high + candles[j].low + candles[j].close) / 3) * candles[j].volume
-            for j in range(start, i + 1)
-        )
-        vol = sum(candles[j].volume for j in range(start, i + 1))
-        if vol > 0:
-            result[i] = tp_vol / vol
-    return result
-
-
-def _keltner(candles: list, period: int = 20, mult: float = 1.5):
-    """Keltner Channels: (upper, mid, lower)."""
-    closes = [c.close for c in candles]
-    mid = _ema(closes, period)
-    atr = _atr(candles, period)
-    n = len(candles)
-    upper = [float("nan")] * n
-    lower = [float("nan")] * n
     for i in range(n):
-        if not (math.isnan(mid[i]) or math.isnan(atr[i])):
-            upper[i] = mid[i] + mult * atr[i]
-            lower[i] = mid[i] - mult * atr[i]
-    return upper, mid, lower
+        hl2 = (candles[i].high + candles[i].low) / 2
+        if not math.isnan(atr[i]):
+            upper_basic[i] = hl2 + mult * atr[i]
+            lower_basic[i] = hl2 - mult * atr[i]
 
-
-def _ichimoku(candles: list, tenkan_p: int = 9, kijun_p: int = 26, senkou_b_p: int = 52):
-    """Ichimoku Cloud: returns dict with cloud info at last bar."""
-    n = len(candles)
-    if n < senkou_b_p + kijun_p:
-        return None
-
-    def donchian_mid(start, end):
-        hh = max(candles[j].high for j in range(start, end))
-        ll = min(candles[j].low for j in range(start, end))
-        return (hh + ll) / 2
-
-    i = n - 1
-    tenkan = donchian_mid(max(0, i - tenkan_p + 1), i + 1)
-    kijun = donchian_mid(max(0, i - kijun_p + 1), i + 1)
-
-    # Senkou Span A = (tenkan + kijun) / 2 shifted forward kijun_p bars
-    # For current analysis we look at the cloud that was projected kijun_p bars ago
-    if i >= kijun_p:
-        past_i = i - kijun_p
-        past_tenkan = donchian_mid(max(0, past_i - tenkan_p + 1), past_i + 1)
-        past_kijun = donchian_mid(max(0, past_i - kijun_p + 1), past_i + 1)
-        senkou_a = (past_tenkan + past_kijun) / 2
-    else:
-        senkou_a = (tenkan + kijun) / 2
-
-    if i >= kijun_p and i - kijun_p >= senkou_b_p:
-        past_i = i - kijun_p
-        senkou_b = donchian_mid(max(0, past_i - senkou_b_p + 1), past_i + 1)
-    else:
-        senkou_b = donchian_mid(max(0, i - senkou_b_p + 1), i + 1)
-
-    cloud_top = max(senkou_a, senkou_b)
-    cloud_bot = min(senkou_a, senkou_b)
-    cl = candles[i].close
-
-    if cl > cloud_top:
-        price_vs_cloud = "above"
-    elif cl < cloud_bot:
-        price_vs_cloud = "below"
-    else:
-        price_vs_cloud = "inside"
-
-    return {
-        "tenkan": tenkan,
-        "kijun": kijun,
-        "senkou_a": senkou_a,
-        "senkou_b": senkou_b,
-        "cloud_top": cloud_top,
-        "cloud_bot": cloud_bot,
-        "price_vs_cloud": price_vs_cloud,
-        "tk_cross_bull": tenkan > kijun,
-        "cloud_green": senkou_a > senkou_b,
-    }
-
-
-def _parabolic_sar(candles: list, af_start: float = 0.02, af_step: float = 0.02, af_max: float = 0.2) -> list:
-    """Parabolic SAR: returns list of direction (1=bull, -1=bear)."""
-    n = len(candles)
-    if n < 2:
-        return [0] * n
-    result = [0] * n
-    trend = 1  # 1 = up, -1 = down
-    af = af_start
-    ep = candles[0].high
-    sar = candles[0].low
+    final_upper = [0.0] * n
+    final_lower = [0.0] * n
+    for i in range(n):
+        if i == 0:
+            final_upper[i] = upper_basic[i]
+            final_lower[i] = lower_basic[i]
+        else:
+            final_upper[i] = (upper_basic[i]
+                              if upper_basic[i] < final_upper[i - 1] or candles[i - 1].close > final_upper[i - 1]
+                              else final_upper[i - 1])
+            final_lower[i] = (lower_basic[i]
+                              if lower_basic[i] > final_lower[i - 1] or candles[i - 1].close < final_lower[i - 1]
+                              else final_lower[i - 1])
 
     for i in range(1, n):
-        prev_sar = sar
-        sar = prev_sar + af * (ep - prev_sar)
-
-        if trend == 1:
-            if candles[i].low < sar:
-                trend = -1
-                sar = ep
-                ep = candles[i].low
-                af = af_start
-            else:
-                if candles[i].high > ep:
-                    ep = candles[i].high
-                    af = min(af + af_step, af_max)
-                sar = min(sar, candles[i - 1].low)
-                if i >= 2:
-                    sar = min(sar, candles[i - 2].low)
+        if st[i - 1] == final_upper[i - 1]:
+            st[i] = final_lower[i] if candles[i].close > final_upper[i] else final_upper[i]
         else:
-            if candles[i].high > sar:
-                trend = 1
-                sar = ep
-                ep = candles[i].high
-                af = af_start
-            else:
-                if candles[i].low < ep:
-                    ep = candles[i].low
-                    af = min(af + af_step, af_max)
-                sar = max(sar, candles[i - 1].high)
-                if i >= 2:
-                    sar = max(sar, candles[i - 2].high)
+            st[i] = final_upper[i] if candles[i].close < final_lower[i] else final_lower[i]
+        direction[i] = 1 if candles[i].close > st[i] else -1
 
-        result[i] = trend
-    return result
+    return st, direction
 
 
 def _adx(candles: list, period: int = 14):
-    """ADX with +DI and -DI: returns (plus_di, minus_di, adx)."""
+    """ADX with +DI and -DI."""
     n = len(candles)
-    plus_di = [float("nan")] * n
+    plus_di  = [float("nan")] * n
     minus_di = [float("nan")] * n
-    adx_arr = [float("nan")] * n
+    adx_arr  = [float("nan")] * n
     if n < period + 1:
         return plus_di, minus_di, adx_arr
 
-    # True Range, +DM, -DM
-    tr = [0.0] * n
-    pdm = [0.0] * n
-    mdm = [0.0] * n
+    tr   = [0.0] * n
+    pdm  = [0.0] * n
+    mdm  = [0.0] * n
     for i in range(1, n):
-        h = candles[i].high
-        l = candles[i].low
-        pc = candles[i - 1].close
-        tr[i] = max(h - l, abs(h - pc), abs(l - pc))
-        up = h - candles[i - 1].high
-        dn = candles[i - 1].low - l
-        pdm[i] = up if up > dn and up > 0 else 0
-        mdm[i] = dn if dn > up and dn > 0 else 0
+        h, l, pc = candles[i].high, candles[i].low, candles[i - 1].close
+        tr[i]  = max(h - l, abs(h - pc), abs(l - pc))
+        up     = h - candles[i - 1].high
+        dn     = candles[i - 1].low - l
+        pdm[i] = up if (up > dn and up > 0) else 0.0
+        mdm[i] = dn if (dn > up and dn > 0) else 0.0
 
-    # Smoothed TR, +DM, -DM using Wilder's
-    str_val = sum(tr[1:period + 1])
-    spdm = sum(pdm[1:period + 1])
-    smdm = sum(mdm[1:period + 1])
-
+    # Wilder smoothing seed
+    str_v = sum(tr[1 : period + 1])
+    spdm  = sum(pdm[1 : period + 1])
+    smdm  = sum(mdm[1 : period + 1])
     dx_vals = []
+
     for i in range(period, n):
-        if i == period:
-            pass
-        else:
-            str_val = str_val - str_val / period + tr[i]
-            spdm = spdm - spdm / period + pdm[i]
-            smdm = smdm - smdm / period + mdm[i]
+        if i > period:
+            str_v = str_v - str_v / period + tr[i]
+            spdm  = spdm  - spdm  / period + pdm[i]
+            smdm  = smdm  - smdm  / period + mdm[i]
 
-        if str_val > 0:
-            plus_di[i] = (spdm / str_val) * 100
-            minus_di[i] = (smdm / str_val) * 100
-        else:
-            plus_di[i] = 0
-            minus_di[i] = 0
+        pdi = (spdm / str_v * 100) if str_v > 0 else 0.0
+        mdi = (smdm / str_v * 100) if str_v > 0 else 0.0
+        plus_di[i]  = pdi
+        minus_di[i] = mdi
 
-        di_sum = plus_di[i] + minus_di[i]
-        if di_sum > 0:
-            dx = abs(plus_di[i] - minus_di[i]) / di_sum * 100
-        else:
-            dx = 0
+        di_sum = pdi + mdi
+        dx = abs(pdi - mdi) / di_sum * 100 if di_sum > 0 else 0.0
         dx_vals.append(dx)
 
         if len(dx_vals) == period:
@@ -495,15 +221,243 @@ def _adx(candles: list, period: int = 14):
     return plus_di, minus_di, adx_arr
 
 
+def _stoch_rsi(closes: list, rsi_period: int = 14, stoch_period: int = 14,
+               k_smooth: int = 3, d_smooth: int = 3):
+    """Stochastic RSI."""
+    rsi = _rsi(closes, rsi_period)
+    n = len(rsi)
+    k_raw = [float("nan")] * n
+    for i in range(stoch_period - 1, n):
+        window = [v for v in rsi[i - stoch_period + 1 : i + 1] if not math.isnan(v)]
+        if not window:
+            continue
+        lo, hi = min(window), max(window)
+        if hi > lo and not math.isnan(rsi[i]):
+            k_raw[i] = (rsi[i] - lo) / (hi - lo) * 100
+        else:
+            k_raw[i] = 50.0
+    k_filled = [v if not math.isnan(v) else 50.0 for v in k_raw]
+    k_smooth_arr = _sma(k_filled, k_smooth)
+    d_filled = [v if not math.isnan(v) else 50.0 for v in k_smooth_arr]
+    d_smooth_arr = _sma(d_filled, d_smooth)
+    return k_smooth_arr, d_smooth_arr
+
+
+def _keltner(candles: list, period: int = 20, mult: float = 1.5):
+    """Keltner Channel: upper, mid (EMA), lower."""
+    closes = [c.close for c in candles]
+    atr    = _atr(candles, period)
+    mid    = _ema(closes, period)
+    n      = len(candles)
+    upper  = [float("nan")] * n
+    lower  = [float("nan")] * n
+    for i in range(n):
+        if not (math.isnan(mid[i]) or math.isnan(atr[i])):
+            upper[i] = mid[i] + mult * atr[i]
+            lower[i] = mid[i] - mult * atr[i]
+    return upper, mid, lower
+
+
+def _ichimoku(candles: list, tenkan: int = 9, kijun: int = 26, senkou_b: int = 52):
+    """Ichimoku Cloud: tenkan_sen, kijun_sen, senkou_a, senkou_b, chikou."""
+    n = len(candles)
+    highs  = [c.high  for c in candles]
+    lows   = [c.low   for c in candles]
+    closes = [c.close for c in candles]
+
+    def _midpoint(h_arr, l_arr, period, i):
+        if i < period - 1:
+            return float("nan")
+        window_h = h_arr[i - period + 1 : i + 1]
+        window_l = l_arr[i - period + 1 : i + 1]
+        return (max(window_h) + min(window_l)) / 2
+
+    tk  = [_midpoint(highs, lows, tenkan,   i) for i in range(n)]
+    kj  = [_midpoint(highs, lows, kijun,    i) for i in range(n)]
+    spA = [float("nan")] * n
+    spB = [float("nan")] * n
+    for i in range(kijun, n):
+        if not (math.isnan(tk[i - kijun]) or math.isnan(kj[i - kijun])):
+            spA[i] = (tk[i - kijun] + kj[i - kijun]) / 2
+        mb = _midpoint(highs, lows, senkou_b, i - kijun)
+        if not math.isnan(mb):
+            spB[i] = mb
+    chikou = [float("nan")] * n
+    for i in range(n - kijun):
+        chikou[i] = closes[i + kijun]
+    return tk, kj, spA, spB, chikou
+
+
+def _psar(candles: list, af_start: float = 0.02, af_max: float = 0.2):
+    """Parabolic SAR. Returns (sar_values, directions) direction: 1=bull, -1=bear."""
+    n = len(candles)
+    if n < 2:
+        return [float("nan")] * n, [1] * n
+    sar    = [0.0] * n
+    bull   = [True] * n
+    ep     = [0.0] * n
+    af_arr = [af_start] * n
+    sar[0] = candles[0].low
+    ep[0]  = candles[0].high
+    for i in range(1, n):
+        prev_bull = bull[i - 1]
+        prev_sar  = sar[i - 1]
+        prev_ep   = ep[i - 1]
+        prev_af   = af_arr[i - 1]
+
+        new_sar = prev_sar + prev_af * (prev_ep - prev_sar)
+        if prev_bull:
+            new_sar = min(new_sar, candles[i - 1].low, candles[max(0, i - 2)].low)
+            if candles[i].low < new_sar:
+                bull[i]   = False
+                sar[i]    = prev_ep
+                ep[i]     = candles[i].low
+                af_arr[i] = af_start
+            else:
+                bull[i] = True
+                sar[i]  = new_sar
+                if candles[i].high > prev_ep:
+                    ep[i]     = candles[i].high
+                    af_arr[i] = min(prev_af + af_start, af_max)
+                else:
+                    ep[i]     = prev_ep
+                    af_arr[i] = prev_af
+        else:
+            new_sar = max(new_sar, candles[i - 1].high, candles[max(0, i - 2)].high)
+            if candles[i].high > new_sar:
+                bull[i]   = True
+                sar[i]    = prev_ep
+                ep[i]     = candles[i].high
+                af_arr[i] = af_start
+            else:
+                bull[i] = False
+                sar[i]  = new_sar
+                if candles[i].low < prev_ep:
+                    ep[i]     = candles[i].low
+                    af_arr[i] = min(prev_af + af_start, af_max)
+                else:
+                    ep[i]     = prev_ep
+                    af_arr[i] = prev_af
+
+    directions = [1 if b else -1 for b in bull]
+    return sar, directions
+
+
+def _obv(candles: list):
+    """On Balance Volume."""
+    obv = [0.0] * len(candles)
+    for i in range(1, len(candles)):
+        if candles[i].close > candles[i - 1].close:
+            obv[i] = obv[i - 1] + candles[i].volume
+        elif candles[i].close < candles[i - 1].close:
+            obv[i] = obv[i - 1] - candles[i].volume
+        else:
+            obv[i] = obv[i - 1]
+    return obv
+
+
+def _mfi(candles: list, period: int = 14) -> list:
+    """Money Flow Index."""
+    n = len(candles)
+    result = [float("nan")] * n
+    if n < period + 1:
+        return result
+    tp    = [(c.high + c.low + c.close) / 3 for c in candles]
+    rmf   = [tp[i] * candles[i].volume for i in range(n)]
+    for i in range(period, n):
+        pos_mf = sum(rmf[j] for j in range(i - period + 1, i + 1) if tp[j] > tp[j - 1])
+        neg_mf = sum(rmf[j] for j in range(i - period + 1, i + 1) if tp[j] < tp[j - 1])
+        if neg_mf == 0:
+            result[i] = 100.0
+        else:
+            result[i] = 100 - (100 / (1 + pos_mf / neg_mf))
+    return result
+
+
+def _cmf(candles: list, period: int = 20) -> list:
+    """Chaikin Money Flow."""
+    n = len(candles)
+    result = [float("nan")] * n
+    if n < period:
+        return result
+    mfv = []
+    for c in candles:
+        rng = c.high - c.low
+        if rng == 0:
+            mfv.append(0.0)
+        else:
+            mfv.append(((c.close - c.low) - (c.high - c.close)) / rng * c.volume)
+    for i in range(period - 1, n):
+        vol_sum = sum(candles[j].volume for j in range(i - period + 1, i + 1))
+        mfv_sum = sum(mfv[j] for j in range(i - period + 1, i + 1))
+        result[i] = mfv_sum / vol_sum if vol_sum > 0 else 0.0
+    return result
+
+
+def _cci(candles: list, period: int = 20) -> list:
+    """Commodity Channel Index."""
+    n = len(candles)
+    result = [float("nan")] * n
+    if n < period:
+        return result
+    tp = [(c.high + c.low + c.close) / 3 for c in candles]
+    for i in range(period - 1, n):
+        window = tp[i - period + 1 : i + 1]
+        mean   = sum(window) / period
+        mad    = sum(abs(x - mean) for x in window) / period
+        if mad > 0:
+            result[i] = (tp[i] - mean) / (0.015 * mad)
+        else:
+            result[i] = 0.0
+    return result
+
+
+def _williams_r(candles: list, period: int = 14) -> list:
+    """Williams %R."""
+    n = len(candles)
+    result = [float("nan")] * n
+    if n < period:
+        return result
+    for i in range(period - 1, n):
+        h = max(c.high  for c in candles[i - period + 1 : i + 1])
+        l = min(c.low   for c in candles[i - period + 1 : i + 1])
+        if h > l:
+            result[i] = (h - candles[i].close) / (h - l) * -100
+        else:
+            result[i] = -50.0
+    return result
+
+
+def _roc(closes: list, period: int = 12) -> list:
+    """Rate of Change %."""
+    n = len(closes)
+    result = [float("nan")] * n
+    for i in range(period, n):
+        if closes[i - period] != 0:
+            result[i] = (closes[i] - closes[i - period]) / closes[i - period] * 100
+    return result
+
+
+def _vwap(candles: list) -> float:
+    """Session VWAP (over the provided candle window)."""
+    cum_pv  = sum((c.high + c.low + c.close) / 3 * c.volume for c in candles)
+    cum_vol = sum(c.volume for c in candles)
+    return cum_pv / cum_vol if cum_vol > 0 else 0.0
+
+
 # ============================================================
 # MASTER INDICATOR ANALYSIS — one call per timeframe
 # ============================================================
 
 def analyze_all_indicators(candles: List[Candle], prefix: str = "5m") -> Dict:
     """
-    Calculate ALL indicators for a list of candles.
+    Calculate ALL indicators for a candle list.
     Returns a flat dict of named indicator values and boolean flags.
-    prefix: e.g., "5m", "15m", "1h", "4h"
+
+    prefix: "5m", "15m", "1h", "4h"
+
+    IMPORTANT: candles should include WARMUP_CANDLES extra bars.
+    Only the last candle's values are used for boolean signals.
     """
     from config import (
         RSI_PERIOD, EMA_FAST, EMA_MID, EMA_SLOW, EMA_200,
@@ -516,231 +470,333 @@ def analyze_all_indicators(candles: List[Candle], prefix: str = "5m") -> Dict:
         OBV_MA_PERIOD, ROC_PERIOD, MOMENTUM_PERIOD,
     )
 
-    r = {}
-    n = len(candles)
+    r   = {}
+    n   = len(candles)
     if n < 5:
         return r
 
-    closes = [c.close for c in candles]
-    highs = [c.high for c in candles]
-    lows = [c.low for c in candles]
+    closes  = [c.close  for c in candles]
+    highs   = [c.high   for c in candles]
+    lows    = [c.low    for c in candles]
     volumes = [c.volume for c in candles]
-    cl = closes[-1]
+    cl      = closes[-1]
 
-    # === RSI ===
+    # ----------------------------------------------------------
+    # RSI
+    # ----------------------------------------------------------
     rsi_arr = _rsi(closes, RSI_PERIOD)
-    rsi = rsi_arr[-1] if not math.isnan(rsi_arr[-1]) else 50.0
-    r[f"{prefix}_rsi"] = round(rsi, 1)
-    r[f"{prefix}_rsi_ob"] = rsi > 70
-    r[f"{prefix}_rsi_os"] = rsi < 30
-    r[f"{prefix}_rsi_bull"] = rsi > 50
-    r[f"{prefix}_rsi_bear"] = rsi < 50
-    # RSI divergence (price vs RSI over last 10 bars)
+    rsi     = rsi_arr[-1] if not math.isnan(rsi_arr[-1]) else 50.0
+    r[f"{prefix}_rsi"]          = round(rsi, 2)
+    r[f"{prefix}_rsi_ob"]       = rsi > 70
+    r[f"{prefix}_rsi_os"]       = rsi < 30
+    r[f"{prefix}_rsi_bull"]     = rsi > 50
+    r[f"{prefix}_rsi_bear"]     = rsi < 50
+    # RSI divergence over last 10 bars
     if n >= 10 and not math.isnan(rsi_arr[-10]):
         price_chg = cl - closes[-10]
-        rsi_chg = rsi - rsi_arr[-10]
+        rsi_chg   = rsi - rsi_arr[-10]
         r[f"{prefix}_rsi_bull_div"] = price_chg < 0 and rsi_chg > 0
         r[f"{prefix}_rsi_bear_div"] = price_chg > 0 and rsi_chg < 0
+    else:
+        r[f"{prefix}_rsi_bull_div"] = False
+        r[f"{prefix}_rsi_bear_div"] = False
 
-    # === EMA ===
-    ef = _ema(closes, EMA_FAST)
-    em = _ema(closes, EMA_MID)
-    es = _ema(closes, EMA_SLOW)
-    e200 = _ema(closes, EMA_200) if n >= EMA_200 else []
-    if ef and es and not (math.isnan(ef[-1]) or math.isnan(es[-1])):
-        r[f"{prefix}_ema_bull"] = ef[-1] > es[-1]
-        r[f"{prefix}_ema_bear"] = ef[-1] < es[-1]
-        if len(ef) >= 2 and len(es) >= 2:
-            r[f"{prefix}_ema_bull_x"] = ef[-2] <= es[-2] and ef[-1] > es[-1]
-            r[f"{prefix}_ema_bear_x"] = ef[-2] >= es[-2] and ef[-1] < es[-1]
-    if ef and em and es and not any(math.isnan(x) for x in [ef[-1], em[-1], es[-1]]):
-        r[f"{prefix}_ribbon_bull"] = ef[-1] > em[-1] > es[-1]
-        r[f"{prefix}_ribbon_bear"] = ef[-1] < em[-1] < es[-1]
-        if es[-1] > 0:
-            spread = abs((ef[-1] - es[-1]) / es[-1] * 100)
-            r[f"{prefix}_ema_squeeze"] = spread < 0.5
-            r[f"{prefix}_ema_spread"] = round(spread, 2)
-    if e200 and not math.isnan(e200[-1]):
-        r[f"{prefix}_above_200ema"] = cl > e200[-1]
-        r[f"{prefix}_below_200ema"] = cl < e200[-1]
-    r[f"{prefix}_price_vs_ema9"] = round((cl / ef[-1] - 1) * 100, 2) if ef and ef[-1] > 0 else 0
+    # RSI zones (useful for binning in analysis)
+    r[f"{prefix}_rsi_zone"] = (
+        "extreme_os"  if rsi < 20 else
+        "oversold"    if rsi < 35 else
+        "neutral_low" if rsi < 50 else
+        "neutral_hi"  if rsi < 65 else
+        "overbought"  if rsi < 80 else
+        "extreme_ob"
+    )
 
-    # === MACD ===
-    ml, ms_line, mh = _macd(closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
-    if not (math.isnan(ml[-1]) or math.isnan(ms_line[-1])):
-        r[f"{prefix}_macd_above"] = ml[-1] > ms_line[-1]
-        r[f"{prefix}_macd_below"] = ml[-1] < ms_line[-1]
-        r[f"{prefix}_macd_hist_pos"] = mh[-1] > 0 if not math.isnan(mh[-1]) else False
-        if len(mh) >= 2 and not math.isnan(mh[-2]):
-            r[f"{prefix}_macd_hist_rising"] = mh[-1] > mh[-2]
-            r[f"{prefix}_macd_cross_up"] = mh[-2] < 0 and mh[-1] >= 0
-            r[f"{prefix}_macd_cross_dn"] = mh[-2] > 0 and mh[-1] <= 0
+    # ----------------------------------------------------------
+    # EMA
+    # ----------------------------------------------------------
+    ef   = _ema(closes, EMA_FAST)
+    em   = _ema(closes, EMA_MID)
+    es   = _ema(closes, EMA_SLOW)
+    e200 = _ema(closes, EMA_200) if n >= EMA_200 else [float("nan")] * n
 
-    # === Bollinger Bands ===
-    bu, bm, bl, bw_arr = _bollinger(closes, BB_PERIOD, BB_STD)
-    if bu and not math.isnan(bu[-1]):
-        r[f"{prefix}_bb_above_up"] = cl > bu[-1]
-        r[f"{prefix}_bb_below_lo"] = cl < bl[-1]
-        r[f"{prefix}_bb_near_up"] = cl > bu[-1] * 0.995
-        r[f"{prefix}_bb_near_lo"] = cl < bl[-1] * 1.005
-        bw = bw_arr[-1] if not math.isnan(bw_arr[-1]) else 0
-        r[f"{prefix}_bb_bw"] = round(bw, 2)
-        r[f"{prefix}_bb_squeeze"] = bw < 3.0
-        r[f"{prefix}_bb_wide"] = bw > 10
-        if bu[-1] - bl[-1] > 0:
-            r[f"{prefix}_bb_pctb"] = round((cl - bl[-1]) / (bu[-1] - bl[-1]), 2)
+    def _ev(arr):
+        v = arr[-1] if arr else float("nan")
+        return v if not math.isnan(v) else 0.0
 
-    # === Supertrend ===
-    st_val, st_dir = _supertrend(candles, SUPERTREND_PERIOD, SUPERTREND_MULT)
-    if st_dir[-1] != 0:
-        r[f"{prefix}_st_bull"] = st_dir[-1] == 1
-        r[f"{prefix}_st_bear"] = st_dir[-1] == -1
-        if n >= 2:
-            r[f"{prefix}_st_flip_bull"] = st_dir[-2] == -1 and st_dir[-1] == 1
-            r[f"{prefix}_st_flip_bear"] = st_dir[-2] == 1 and st_dir[-1] == -1
-        # Streak
-        streak = 1
-        for j in range(n - 2, -1, -1):
-            if st_dir[j] == st_dir[-1]:
-                streak += 1
-            else:
-                break
-        r[f"{prefix}_st_streak"] = streak
-        r[f"{prefix}_st_strong"] = streak >= 5
+    ef_v, em_v, es_v, e200_v = _ev(ef), _ev(em), _ev(es), _ev(e200)
 
-    # === Stochastic RSI ===
-    sk, sd = _stoch_rsi(closes, RSI_PERIOD, STOCH_RSI_PERIOD, STOCH_K, STOCH_D)
-    if sk and not math.isnan(sk[-1]):
-        r[f"{prefix}_stoch_k"] = round(sk[-1], 1)
-        r[f"{prefix}_stoch_ob"] = sk[-1] > 80
-        r[f"{prefix}_stoch_os"] = sk[-1] < 20
+    r[f"{prefix}_ema_fast"]     = round(ef_v, 6)
+    r[f"{prefix}_ema_mid"]      = round(em_v, 6)
+    r[f"{prefix}_ema_slow"]     = round(es_v, 6)
+    r[f"{prefix}_ema200"]       = round(e200_v, 6)
+    r[f"{prefix}_ema_bull"]     = ef_v > es_v
+    r[f"{prefix}_ema_bear"]     = ef_v < es_v
+    r[f"{prefix}_above_ema200"] = cl > e200_v > 0
+    r[f"{prefix}_below_ema200"] = cl < e200_v and e200_v > 0
+    # Crossover (last bar)
+    if len(ef) >= 2 and len(es) >= 2:
+        ef2, es2 = ef[-2], es[-2]
+        r[f"{prefix}_ema_bull_x"] = (not math.isnan(ef2)) and (not math.isnan(es2)) and ef2 <= es2 and ef_v > es_v
+        r[f"{prefix}_ema_bear_x"] = (not math.isnan(ef2)) and (not math.isnan(es2)) and ef2 >= es2 and ef_v < es_v
+    else:
+        r[f"{prefix}_ema_bull_x"] = False
+        r[f"{prefix}_ema_bear_x"] = False
 
-    # === ADX / DI ===
-    pdi, mdi, adx_a = _adx(candles, ADX_PERIOD)
-    if not math.isnan(adx_a[-1]):
-        r[f"{prefix}_adx"] = round(adx_a[-1], 1)
-        r[f"{prefix}_adx_strong"] = adx_a[-1] > 25
-        r[f"{prefix}_adx_weak"] = adx_a[-1] < 20
-    if not (math.isnan(pdi[-1]) or math.isnan(mdi[-1])):
-        r[f"{prefix}_di_bull"] = pdi[-1] > mdi[-1]
-        r[f"{prefix}_di_bear"] = pdi[-1] < mdi[-1]
+    # EMA ribbon (all 4 EMAs ordered)
+    if all(x > 0 for x in [ef_v, em_v, es_v]):
+        r[f"{prefix}_ribbon_bull"] = ef_v > em_v > es_v
+        r[f"{prefix}_ribbon_bear"] = ef_v < em_v < es_v
+    else:
+        r[f"{prefix}_ribbon_bull"] = False
+        r[f"{prefix}_ribbon_bear"] = False
 
-    # === Williams %R ===
-    wr = _williams_r(candles, WILLIAMS_R_PERIOD)
-    if not math.isnan(wr[-1]):
-        r[f"{prefix}_wr"] = round(wr[-1], 1)
-        r[f"{prefix}_wr_ob"] = wr[-1] > -20
-        r[f"{prefix}_wr_os"] = wr[-1] < -80
-        r[f"{prefix}_wr_extreme_os"] = wr[-1] < -95
+    # ----------------------------------------------------------
+    # MACD
+    # ----------------------------------------------------------
+    macd_line, macd_sig, macd_hist = _macd(closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
+    ml   = macd_line[-1] if not math.isnan(macd_line[-1]) else 0.0
+    ms   = macd_sig[-1]  if not math.isnan(macd_sig[-1])  else 0.0
+    mh   = macd_hist[-1] if not math.isnan(macd_hist[-1]) else 0.0
+    mh2  = macd_hist[-2] if len(macd_hist) >= 2 and not math.isnan(macd_hist[-2]) else mh
 
-    # === CCI ===
-    cci = _cci(candles, CCI_PERIOD)
-    if not math.isnan(cci[-1]):
-        r[f"{prefix}_cci"] = round(cci[-1], 1)
-        r[f"{prefix}_cci_ob"] = cci[-1] > 100
-        r[f"{prefix}_cci_os"] = cci[-1] < -100
+    r[f"{prefix}_macd_line"]    = round(ml, 8)
+    r[f"{prefix}_macd_sig"]     = round(ms, 8)
+    r[f"{prefix}_macd_hist"]    = round(mh, 8)
+    r[f"{prefix}_macd_above"]   = ml > ms
+    r[f"{prefix}_macd_below"]   = ml < ms
+    r[f"{prefix}_macd_bull_x"]  = mh > 0 and mh2 <= 0
+    r[f"{prefix}_macd_bear_x"]  = mh < 0 and mh2 >= 0
+    r[f"{prefix}_macd_hist_up"] = mh > mh2
+    r[f"{prefix}_macd_hist_dn"] = mh < mh2
 
-    # === ROC ===
-    roc = _roc(closes, ROC_PERIOD)
-    if not math.isnan(roc[-1]):
-        r[f"{prefix}_roc"] = round(roc[-1], 2)
-        r[f"{prefix}_roc_strong"] = roc[-1] > 2
-        r[f"{prefix}_roc_weak"] = roc[-1] < -2
+    # ----------------------------------------------------------
+    # Bollinger Bands
+    # ----------------------------------------------------------
+    bb_up, bb_mid, bb_lo, bb_bw = _bollinger(closes, BB_PERIOD, BB_STD)
+    bbu  = bb_up[-1]  if not math.isnan(bb_up[-1])  else 0.0
+    bbm  = bb_mid[-1] if not math.isnan(bb_mid[-1]) else 0.0
+    bbl  = bb_lo[-1]  if not math.isnan(bb_lo[-1])  else 0.0
+    bwv  = bb_bw[-1]  if not math.isnan(bb_bw[-1])  else 0.0
 
-    # === Momentum ===
-    mom = _momentum(closes, MOMENTUM_PERIOD)
-    if not math.isnan(mom[-1]):
-        r[f"{prefix}_mom_pos"] = mom[-1] > 0
-        r[f"{prefix}_mom_neg"] = mom[-1] < 0
-        if n >= 3 and not (math.isnan(mom[-2]) or math.isnan(mom[-3])):
-            r[f"{prefix}_mom_accel"] = mom[-1] > mom[-2] > mom[-3]
+    r[f"{prefix}_bb_upper"]     = round(bbu, 6)
+    r[f"{prefix}_bb_mid"]       = round(bbm, 6)
+    r[f"{prefix}_bb_lower"]     = round(bbl, 6)
+    r[f"{prefix}_bb_bw"]        = round(bwv, 2)
+    r[f"{prefix}_bb_squeeze"]   = 0 < bwv < 3.0
+    r[f"{prefix}_bb_above_up"]  = cl > bbu > 0
+    r[f"{prefix}_bb_below_lo"]  = cl < bbl and bbl > 0
+    # Percent-B  (position within bands)
+    if bbu > bbl:
+        pb = (cl - bbl) / (bbu - bbl) * 100
+        r[f"{prefix}_bb_pct_b"] = round(pb, 2)
+    else:
+        r[f"{prefix}_bb_pct_b"] = 50.0
 
-    # === OBV ===
-    obv = _obv(candles)
-    obv_ma = _sma(obv, OBV_MA_PERIOD)
-    if obv_ma and not math.isnan(obv_ma[-1]):
-        r[f"{prefix}_obv_above_ma"] = obv[-1] > obv_ma[-1]
-    if n >= 5:
-        r[f"{prefix}_obv_rising"] = obv[-1] > obv[-5]
-        r[f"{prefix}_obv_falling"] = obv[-1] < obv[-5]
-    # OBV divergence
-    if n >= 10:
-        ps = closes[-1] - closes[-5]
-        os_ = obv[-1] - obv[-5]
-        r[f"{prefix}_obv_bull_div"] = ps < 0 and os_ > 0
-        r[f"{prefix}_obv_bear_div"] = ps > 0 and os_ < 0
+    # ----------------------------------------------------------
+    # ATR (absolute and % of price)
+    # ----------------------------------------------------------
+    atr_arr = _atr(candles, ATR_PERIOD)
+    atr_v   = atr_arr[-1] if not math.isnan(atr_arr[-1]) else 0.0
+    r[f"{prefix}_atr"]      = round(atr_v, 6)
+    r[f"{prefix}_atr_pct"]  = round(atr_v / cl * 100, 3) if cl > 0 else 0.0
 
-    # === MFI ===
-    mfi = _mfi(candles, MFI_PERIOD)
-    if not math.isnan(mfi[-1]):
-        r[f"{prefix}_mfi"] = round(mfi[-1], 1)
-        r[f"{prefix}_mfi_os"] = mfi[-1] < 20
-        r[f"{prefix}_mfi_ob"] = mfi[-1] > 80
+    # ----------------------------------------------------------
+    # Supertrend
+    # ----------------------------------------------------------
+    st_vals, st_dirs = _supertrend(candles, SUPERTREND_PERIOD, SUPERTREND_MULT)
+    st_d = st_dirs[-1]
+    r[f"{prefix}_st_bull"]   = st_d == 1
+    r[f"{prefix}_st_bear"]   = st_d == -1
+    r[f"{prefix}_st_val"]    = round(st_vals[-1], 6)
+    # Flip (direction change on last bar)
+    if len(st_dirs) >= 2:
+        r[f"{prefix}_st_bull_flip"] = st_dirs[-2] == -1 and st_d == 1
+        r[f"{prefix}_st_bear_flip"] = st_dirs[-2] == 1  and st_d == -1
+    else:
+        r[f"{prefix}_st_bull_flip"] = False
+        r[f"{prefix}_st_bear_flip"] = False
 
-    # === CMF ===
-    cmf = _cmf(candles, CMF_PERIOD)
-    if not math.isnan(cmf[-1]):
-        r[f"{prefix}_cmf"] = round(cmf[-1], 3)
-        r[f"{prefix}_cmf_pos"] = cmf[-1] > 0.05
-        r[f"{prefix}_cmf_neg"] = cmf[-1] < -0.05
+    # ----------------------------------------------------------
+    # ADX
+    # ----------------------------------------------------------
+    plus_di, minus_di, adx_arr = _adx(candles, ADX_PERIOD)
+    adx_v = adx_arr[-1]  if not math.isnan(adx_arr[-1])  else 0.0
+    pdi   = plus_di[-1]  if not math.isnan(plus_di[-1])   else 0.0
+    mdi   = minus_di[-1] if not math.isnan(minus_di[-1])  else 0.0
+    r[f"{prefix}_adx"]        = round(adx_v, 2)
+    r[f"{prefix}_plus_di"]    = round(pdi, 2)
+    r[f"{prefix}_minus_di"]   = round(mdi, 2)
+    r[f"{prefix}_adx_strong"] = adx_v > 25
+    r[f"{prefix}_di_bull"]    = pdi > mdi
+    r[f"{prefix}_di_bear"]    = pdi < mdi
 
-    # === VWAP ===
-    vwap = _vwap(candles, 200)
-    if not math.isnan(vwap[-1]):
-        r[f"{prefix}_above_vwap"] = cl > vwap[-1]
-        r[f"{prefix}_below_vwap"] = cl < vwap[-1]
+    # ----------------------------------------------------------
+    # Stochastic RSI
+    # ----------------------------------------------------------
+    sk, sd = _stoch_rsi(closes, STOCH_RSI_PERIOD, STOCH_RSI_PERIOD, STOCH_K, STOCH_D)
+    sk_v = sk[-1] if sk and not math.isnan(sk[-1]) else 50.0
+    sd_v = sd[-1] if sd and not math.isnan(sd[-1]) else 50.0
+    r[f"{prefix}_stoch_k"]      = round(sk_v, 2)
+    r[f"{prefix}_stoch_d"]      = round(sd_v, 2)
+    r[f"{prefix}_stoch_ob"]     = sk_v > 80
+    r[f"{prefix}_stoch_os"]     = sk_v < 20
+    r[f"{prefix}_stoch_bull_x"] = sk_v > sd_v
+    r[f"{prefix}_stoch_bear_x"] = sk_v < sd_v
 
-    # === Keltner Channels ===
-    kc_u, kc_m, kc_l = _keltner(candles, KC_PERIOD, KC_MULT)
-    if not (math.isnan(kc_u[-1]) or math.isnan(kc_l[-1])):
-        r[f"{prefix}_kc_above"] = cl > kc_u[-1]
-        r[f"{prefix}_kc_below"] = cl < kc_l[-1]
-        # TTM Squeeze: BB inside KC
-        if bu and not math.isnan(bu[-1]):
-            r[f"{prefix}_ttm_squeeze"] = bl[-1] > kc_l[-1] and bu[-1] < kc_u[-1]
+    # ----------------------------------------------------------
+    # CCI
+    # ----------------------------------------------------------
+    cci_arr = _cci(candles, CCI_PERIOD)
+    cci_v   = cci_arr[-1] if not math.isnan(cci_arr[-1]) else 0.0
+    r[f"{prefix}_cci"]      = round(cci_v, 2)
+    r[f"{prefix}_cci_ob"]   = cci_v > 100
+    r[f"{prefix}_cci_os"]   = cci_v < -100
+    r[f"{prefix}_cci_bull"] = cci_v > 0
+    r[f"{prefix}_cci_bear"] = cci_v < 0
 
-    # === Ichimoku ===
-    ich = _ichimoku(candles, ICHIMOKU_TENKAN, ICHIMOKU_KIJUN, ICHIMOKU_SENKOU_B)
-    if ich:
-        r[f"{prefix}_ich_above"] = ich["price_vs_cloud"] == "above"
-        r[f"{prefix}_ich_below"] = ich["price_vs_cloud"] == "below"
-        r[f"{prefix}_ich_inside"] = ich["price_vs_cloud"] == "inside"
-        r[f"{prefix}_ich_tk_bull"] = ich["tk_cross_bull"]
+    # ----------------------------------------------------------
+    # Williams %R
+    # ----------------------------------------------------------
+    wr_arr = _williams_r(candles, WILLIAMS_R_PERIOD)
+    wr_v   = wr_arr[-1] if not math.isnan(wr_arr[-1]) else -50.0
+    r[f"{prefix}_wr"]       = round(wr_v, 2)
+    r[f"{prefix}_wr_ob"]    = wr_v > -20
+    r[f"{prefix}_wr_os"]    = wr_v < -80
+    r[f"{prefix}_wr_bull"]  = wr_v > -50
+    r[f"{prefix}_wr_bear"]  = wr_v < -50
 
-    # === Parabolic SAR ===
-    psar = _parabolic_sar(candles, PSAR_AF_START, PSAR_AF_START, PSAR_AF_MAX)
-    if psar[-1] != 0:
-        r[f"{prefix}_psar_bull"] = psar[-1] == 1
-        r[f"{prefix}_psar_bear"] = psar[-1] == -1
-        if n >= 2:
-            r[f"{prefix}_psar_flip_bull"] = psar[-2] == -1 and psar[-1] == 1
-            r[f"{prefix}_psar_flip_bear"] = psar[-2] == 1 and psar[-1] == -1
+    # ----------------------------------------------------------
+    # Keltner Channel
+    # ----------------------------------------------------------
+    kc_up, kc_mid, kc_lo = _keltner(candles, KC_PERIOD, KC_MULT)
+    kcu = kc_up[-1]  if not math.isnan(kc_up[-1])  else 0.0
+    kcl = kc_lo[-1]  if not math.isnan(kc_lo[-1])  else 0.0
+    r[f"{prefix}_kc_above"]  = cl > kcu > 0
+    r[f"{prefix}_kc_below"]  = cl < kcl and kcl > 0
+    # BB squeeze vs Keltner (BB inside KC = squeeze)
+    if bbu > 0 and kcu > 0:
+        r[f"{prefix}_sqz_on"]  = bbu < kcu and bbl > kcl
+        r[f"{prefix}_sqz_off"] = bbu > kcu and bbl < kcl
+    else:
+        r[f"{prefix}_sqz_on"]  = False
+        r[f"{prefix}_sqz_off"] = False
 
-    # === ATR ===
-    atr = _atr(candles, ATR_PERIOD)
-    if not math.isnan(atr[-1]) and cl > 0:
-        r[f"{prefix}_atr_pct"] = round(atr[-1] / cl * 100, 2)
+    # ----------------------------------------------------------
+    # Ichimoku
+    # ----------------------------------------------------------
+    tk_arr, kj_arr, spA, spB, chikou = _ichimoku(candles, ICHIMOKU_TENKAN, ICHIMOKU_KIJUN, ICHIMOKU_SENKOU_B)
+    tk_v  = tk_arr[-1]  if not math.isnan(tk_arr[-1])  else 0.0
+    kj_v  = kj_arr[-1]  if not math.isnan(kj_arr[-1])  else 0.0
+    spA_v = spA[-1]     if not math.isnan(spA[-1])      else 0.0
+    spB_v = spB[-1]     if not math.isnan(spB[-1])      else 0.0
+    cloud_top = max(spA_v, spB_v)
+    cloud_bot = min(spA_v, spB_v)
+    r[f"{prefix}_ich_above_cloud"] = cl > cloud_top > 0
+    r[f"{prefix}_ich_below_cloud"] = cl < cloud_bot and cloud_bot > 0
+    r[f"{prefix}_ich_in_cloud"]    = cloud_bot <= cl <= cloud_top if cloud_top > 0 else False
+    r[f"{prefix}_ich_bull_cloud"]  = spA_v > spB_v               # green cloud
+    r[f"{prefix}_ich_bear_cloud"]  = spA_v < spB_v               # red cloud
+    r[f"{prefix}_ich_tk_kj_bull"]  = tk_v > kj_v
+    r[f"{prefix}_ich_tk_kj_bear"]  = tk_v < kj_v
 
-    # === Volume Analysis ===
-    vm = _sma(volumes, VOL_MA_PERIOD)
-    if vm and not math.isnan(vm[-1]) and vm[-1] > 0:
-        vr = volumes[-1] / vm[-1]
-        r[f"{prefix}_vol_ratio"] = round(vr, 2)
-        r[f"{prefix}_vol_spike"] = vr > 2.0
-        r[f"{prefix}_vol_high"] = vr > 1.5
-        r[f"{prefix}_vol_low"] = vr < 0.5
-    if n >= 5:
-        rv = volumes[-5:]
-        r[f"{prefix}_vol_increasing"] = all(rv[i] >= rv[i - 1] * 0.95 for i in range(1, len(rv)))
+    # ----------------------------------------------------------
+    # Parabolic SAR
+    # ----------------------------------------------------------
+    psar_v, psar_d = _psar(candles, PSAR_AF_START, PSAR_AF_MAX)
+    ps_dir = psar_d[-1]
+    r[f"{prefix}_psar_bull"]      = ps_dir == 1
+    r[f"{prefix}_psar_bear"]      = ps_dir == -1
+    if len(psar_d) >= 2:
+        r[f"{prefix}_psar_bull_flip"] = psar_d[-2] == -1 and ps_dir == 1
+        r[f"{prefix}_psar_bear_flip"] = psar_d[-2] == 1  and ps_dir == -1
+    else:
+        r[f"{prefix}_psar_bull_flip"] = False
+        r[f"{prefix}_psar_bear_flip"] = False
 
-    # === Structure: Higher Highs / Lower Lows ===
-    if n >= 5:
-        r[f"{prefix}_hh"] = highs[-1] > highs[-2] and highs[-2] > highs[-3]
-        r[f"{prefix}_ll"] = lows[-1] < lows[-2] and lows[-2] < lows[-3]
+    # ----------------------------------------------------------
+    # OBV
+    # ----------------------------------------------------------
+    obv_arr   = _obv(candles)
+    obv_ma    = _sma(obv_arr, OBV_MA_PERIOD)
+    obv_v     = obv_arr[-1]
+    obv_ma_v  = obv_ma[-1]  if not math.isnan(obv_ma[-1])  else 0.0
+    r[f"{prefix}_obv"]        = round(obv_v, 0)
+    r[f"{prefix}_obv_rising"] = obv_v > obv_ma_v
 
-    # === Candle Patterns ===
+    # ----------------------------------------------------------
+    # MFI
+    # ----------------------------------------------------------
+    mfi_arr = _mfi(candles, MFI_PERIOD)
+    mfi_v   = mfi_arr[-1] if not math.isnan(mfi_arr[-1]) else 50.0
+    r[f"{prefix}_mfi"]      = round(mfi_v, 2)
+    r[f"{prefix}_mfi_ob"]   = mfi_v > 80
+    r[f"{prefix}_mfi_os"]   = mfi_v < 20
+    r[f"{prefix}_mfi_bull"] = mfi_v > 50
+
+    # ----------------------------------------------------------
+    # CMF
+    # ----------------------------------------------------------
+    cmf_arr = _cmf(candles, CMF_PERIOD)
+    cmf_v   = cmf_arr[-1] if not math.isnan(cmf_arr[-1]) else 0.0
+    r[f"{prefix}_cmf"]      = round(cmf_v, 4)
+    r[f"{prefix}_cmf_bull"] = cmf_v > 0
+    r[f"{prefix}_cmf_bear"] = cmf_v < 0
+
+    # ----------------------------------------------------------
+    # Volume
+    # ----------------------------------------------------------
+    vol_ma   = _sma(volumes, VOL_MA_PERIOD)
+    vol_ma_v = vol_ma[-1] if not math.isnan(vol_ma[-1]) else 0.0
+    vol_cur  = volumes[-1]
+    vol_ratio = vol_cur / vol_ma_v if vol_ma_v > 0 else 1.0
+    r[f"{prefix}_vol_ma"]      = round(vol_ma_v, 2)
+    r[f"{prefix}_vol_ratio"]   = round(vol_ratio, 3)
+    r[f"{prefix}_vol_spike"]   = vol_ratio > 2.0
+    r[f"{prefix}_vol_high"]    = vol_ratio > 1.5
+    r[f"{prefix}_vol_low"]     = vol_ratio < 0.5
+    r[f"{prefix}_vol_rising"]  = vol_cur > vol_ma_v
+
+    # ----------------------------------------------------------
+    # ROC
+    # ----------------------------------------------------------
+    roc_arr = _roc(closes, ROC_PERIOD)
+    roc_v   = roc_arr[-1] if not math.isnan(roc_arr[-1]) else 0.0
+    r[f"{prefix}_roc"]      = round(roc_v, 3)
+    r[f"{prefix}_roc_bull"] = roc_v > 0
+
+    # ----------------------------------------------------------
+    # VWAP (over current candle window)
+    # ----------------------------------------------------------
+    vwap_v = _vwap(candles)
+    r[f"{prefix}_vwap"]         = round(vwap_v, 6)
+    r[f"{prefix}_above_vwap"]   = cl > vwap_v > 0
+    r[f"{prefix}_below_vwap"]   = cl < vwap_v and vwap_v > 0
+
+    # ----------------------------------------------------------
+    # Price Structure
+    # ----------------------------------------------------------
     if n >= 3:
-        r[f"{prefix}_three_green"] = all(candles[-j].close > candles[-j].open for j in range(1, 4))
-        r[f"{prefix}_three_red"] = all(candles[-j].close < candles[-j].open for j in range(1, 4))
+        # Higher High / Lower Low (last 3 candles)
+        r[f"{prefix}_hh"] = highs[-1] > highs[-2] > highs[-3]
+        r[f"{prefix}_ll"] = lows[-1]  < lows[-2]  < lows[-3]
+        r[f"{prefix}_hl"] = lows[-1]  > lows[-2]                # higher low
+        r[f"{prefix}_lh"] = highs[-1] < highs[-2]               # lower high
+    # Candle patterns
+    body    = abs(cl - candles[-1].open)
+    candle_range = candles[-1].high - candles[-1].low
+    if n >= 3:
+        avg_body = sum(abs(candles[-i].close - candles[-i].open) for i in range(1, 4)) / 3
+        # Three white soldiers / three black crows
+        r[f"{prefix}_three_green"] = all(
+            candles[-i].close > candles[-i].open for i in range(1, 4)
+        )
+        r[f"{prefix}_three_red"] = all(
+            candles[-i].close < candles[-i].open for i in range(1, 4)
+        )
+        # Big green / big red candle
+        r[f"{prefix}_big_green"] = (candles[-1].close > candles[-1].open and
+                                    body > avg_body * 1.5)
+        r[f"{prefix}_big_red"]   = (candles[-1].close < candles[-1].open and
+                                    body > avg_body * 1.5)
 
     return r

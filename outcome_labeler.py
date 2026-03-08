@@ -921,37 +921,46 @@ async def label_events(rerun: bool = False, label_all: bool = False):
     print(f"  Patched {len(outcome_updates)} rows → {parquet_path} ({fmt})")
 
     # Step 5: export labeled rows to outcome_labels.csv
-    # Load only labeled rows using minimal read
+    # Stream directly — never load all labeled rows into memory at once.
+    import csv as _csv
     out_csv = os.path.join(DATA_DIR, "outcomes", "outcome_labels.csv")
-    pd = None
-    try:
-        import pandas as _pd
-        pd = _pd
-    except ImportError:
-        pass
+    os.makedirs(os.path.dirname(out_csv), exist_ok=True)
 
     csv_path = parquet_path.replace(".parquet", ".csv")
-    if pd is not None and os.path.exists(parquet_path):
-        try:
-            df = pd.read_parquet(parquet_path)
-            labeled_df = df[df["outcome_labeled"].astype(str).isin(["True", "1", "true"])]
-            labeled_rows = labeled_df.to_dict(orient="records")
-        except Exception:
-            labeled_rows = []
-    elif os.path.exists(csv_path):
-        labeled_rows = []
-        import csv as _csv
-        with open(csv_path, "r", newline="", encoding="utf-8") as f:
-            reader = _csv.DictReader(f)
-            for row in reader:
-                if _safe_bool(row.get("outcome_labeled", False)):
-                    labeled_rows.append(dict(row))
-    else:
-        labeled_rows = []
+    source   = csv_path if os.path.exists(csv_path) else (
+               parquet_path if os.path.exists(parquet_path) else None)
 
-    if labeled_rows:
-        save_csv_generic(labeled_rows, out_csv)
-        print(f"  Exported {len(labeled_rows)} labeled rows → {out_csv}")
+    exported = 0
+    if source:
+        print(f"  Exporting labeled rows to {out_csv} ...")
+        out_writer = None
+        out_fh     = None
+        try:
+            with open(source, "r", newline="", encoding="utf-8") as fin:
+                reader    = _csv.DictReader(fin)
+                fieldnames = list(reader.fieldnames or [])
+
+                for row in reader:
+                    if not _safe_bool(row.get("outcome_labeled", False)):
+                        continue
+                    # Open output file on first labeled row (so we have fieldnames)
+                    if out_writer is None:
+                        out_fh     = open(out_csv, "w", newline="", encoding="utf-8")
+                        out_writer = _csv.DictWriter(out_fh, fieldnames=fieldnames,
+                                                     extrasaction="ignore", restval="")
+                        out_writer.writeheader()
+                    out_writer.writerow(row)
+                    exported += 1
+                    if exported % 100000 == 0:
+                        print(f"    ... exported {exported} labeled rows")
+        finally:
+            if out_fh:
+                out_fh.close()
+
+    if exported > 0:
+        print(f"  Exported {exported} labeled rows → {out_csv}")
+    else:
+        print(f"  No labeled rows found to export.")
 
     print("  Done.")
 

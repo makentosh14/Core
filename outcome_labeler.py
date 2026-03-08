@@ -503,44 +503,70 @@ def event_is_mature(event_ts_ms: int) -> bool:
 # MAIN LABELING PASS
 # ============================================================
 
+def _is_real_parquet(filepath: str) -> bool:
+    """
+    Check if a file is actually a parquet binary file (magic bytes PAR1).
+    The scanner sometimes saves CSV content with a .parquet extension
+    when pyarrow is unavailable. Reading that with pd.read_parquet hangs.
+    """
+    if not os.path.exists(filepath):
+        return False
+    try:
+        with open(filepath, "rb") as f:
+            header = f.read(4)
+        return header == b"PAR1"
+    except Exception:
+        return False
+
+
 def _load_minimal_rows(parquet_path: str) -> List[Dict]:
     """
-    Load only the columns needed to decide what to label.
-    Avoids loading all 500+ indicator columns into RAM just for filtering.
-    Minimal columns: event_id, symbol, timestamp, price, direction,
-                     outcome_labeled, outcome_resolved
-    If parquet is unavailable falls back to full CSV load (acceptable for CSV).
+    Load only the 7 columns needed to decide what to label.
+    Prints progress so the user knows it is working.
+
+    Priority:
+    1. Real parquet file → pd.read_parquet with column selection (fast)
+    2. CSV file → csv.DictReader with column selection (slower but safe)
+    3. Nothing found → return []
     """
     MINIMAL_COLS = [
         "event_id", "symbol", "timestamp", "price",
         "direction", "outcome_labeled", "outcome_resolved",
     ]
-    pd = None
-    try:
-        import pandas as _pd
-        pd = _pd
-    except ImportError:
-        pass
-
     csv_path = parquet_path.replace(".parquet", ".csv")
 
-    if pd is not None and os.path.exists(parquet_path):
+    # Try real parquet first (magic bytes check — avoids hanging on CSV-as-parquet)
+    if _is_real_parquet(parquet_path):
+        print(f"  Reading parquet: {parquet_path}")
         try:
-            df = pd.read_parquet(parquet_path, columns=MINIMAL_COLS)
+            import pandas as _pd
+            df = _pd.read_parquet(parquet_path, columns=MINIMAL_COLS)
+            print(f"  Read {len(df)} rows from parquet.")
             return df.to_dict(orient="records")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  [WARN] Parquet read failed: {e}")
 
-    # CSV fallback: full load (CSV has no column selection without pandas)
-    if os.path.exists(csv_path):
-        rows = []
+    # CSV path (explicit .csv file or parquet that is actually CSV)
+    target_csv = csv_path if os.path.exists(csv_path) else None
+    # Also check if .parquet file is actually CSV content
+    if target_csv is None and os.path.exists(parquet_path) and not _is_real_parquet(parquet_path):
+        target_csv = parquet_path
+
+    if target_csv:
+        size_mb = os.path.getsize(target_csv) / 1024 / 1024
+        print(f"  Reading CSV: {target_csv} ({size_mb:.1f} MB) ...")
         import csv as _csv
-        with open(csv_path, "r", newline="", encoding="utf-8") as f:
+        rows = []
+        with open(target_csv, "r", newline="", encoding="utf-8") as f:
             reader = _csv.DictReader(f)
-            for row in reader:
+            for i, row in enumerate(reader):
                 rows.append({k: row.get(k, "") for k in MINIMAL_COLS})
+                if i > 0 and i % 500 == 0:
+                    print(f"    ... read {i} rows so far")
+        print(f"  Read {len(rows)} rows from CSV.")
         return rows
 
+    print(f"  No data file found at {parquet_path} or {csv_path}")
     return []
 
 
@@ -653,6 +679,8 @@ async def label_events(rerun: bool = False, label_all: bool = False):
     print(f"\n{'='*60}")
     print(f"  OUTCOME LABELER  (path-aware v2)")
     print(f"{'='*60}")
+    print(f"  Data path: {parquet_path}")
+    print(f"  Loading events ...")
 
     # Step 1: load only minimal columns for filtering (low RAM)
     rows = _load_minimal_rows(parquet_path)

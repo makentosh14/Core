@@ -296,18 +296,72 @@ def snapshot_to_research_row(
 # SAVE RESEARCH EVENTS
 # ============================================================
 
+def _load_existing_event_ids(filepath: str) -> set:
+    """
+    Read only the event_id column from an existing CSV or parquet file.
+    Much faster than loading all 500+ columns just to deduplicate.
+    """
+    pd = _try_import_pandas()
+    if pd is not None and os.path.exists(filepath):
+        try:
+            df = pd.read_parquet(filepath, columns=["event_id"])
+            return set(df["event_id"].astype(str).tolist())
+        except Exception:
+            pass
+    csv_path = filepath.replace(".parquet", ".csv")
+    if os.path.exists(csv_path):
+        ids = set()
+        with open(csv_path, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                eid = row.get("event_id", "")
+                if eid:
+                    ids.add(eid)
+        return ids
+    return set()
+
+
+def _append_rows_to_parquet(rows: List[Dict], filepath: str) -> bool:
+    """
+    Append new rows to parquet by reading existing + writing combined.
+    Fast because parquet is columnar. Returns True if succeeded.
+    """
+    pd = _try_import_pandas()
+    if pd is None:
+        return False
+    try:
+        if os.path.exists(filepath):
+            existing_df = pd.read_parquet(filepath)
+            new_df      = pd.DataFrame(rows)
+            combined    = pd.concat([existing_df, new_df], ignore_index=True)
+        else:
+            combined = pd.DataFrame(rows)
+        combined.to_parquet(filepath, index=False, engine="pyarrow")
+        return True
+    except Exception:
+        return False
+
+
 def save_research_events(
-    snapshots:  List[MTFSnapshot],
-    scan_cycle: int = 0,
+    snapshots:    List[MTFSnapshot],
+    scan_cycle:   int  = 0,
     signals_only: bool = False,
 ) -> str:
     """
     Save snapshots to the research dataset.
 
-    signals_only=False → save ALL snapshots (for base-rate analysis)
-    signals_only=True  → save only snapshots with direction (signals)
+    signals_only=False -> save ALL snapshots (for base-rate analysis)
+    signals_only=True  -> save only snapshots with direction (signals)
 
-    Returns path to the saved file.
+    PERFORMANCE FIX:
+    Old logic loaded the ENTIRE file every cycle to deduplicate, then rewrote
+    the whole file. With 500+ columns this hangs after a few cycles.
+
+    New logic:
+    - Read only the event_id column for dedup (fast, single column).
+    - Append only the new rows.
+    - CSV fallback: pure append via save_csv_generic (schema-safe).
+    - Parquet: read parquet + rewrite parquet (fast columnar read).
     """
     ensure_data_dir()
 
@@ -323,21 +377,31 @@ def save_research_events(
         for s in to_save
     ]
 
-    # Parquet path
     parquet_path = os.path.join(DATA_DIR, "raw", RESEARCH_PARQUET)
-    # We append by loading existing, combining, re-saving
-    existing = load_parquet(parquet_path)
-    # De-duplicate by event_id
-    existing_ids = {r.get("event_id") for r in existing}
-    new_rows     = [r for r in rows if r.get("event_id") not in existing_ids]
-    all_rows     = existing + new_rows
+    csv_path     = parquet_path.replace(".parquet", ".csv")
 
-    if all_rows:
-        ok = save_parquet(all_rows, parquet_path)
-        status = "parquet" if ok else "csv"
-        print(f"  [STORAGE] +{len(new_rows)} events → {parquet_path} ({status}). Total: {len(all_rows)}")
+    # Step 1: read only event_ids for dedup (single column, very fast)
+    existing_ids = _load_existing_event_ids(parquet_path)
+    new_rows     = [r for r in rows if str(r.get("event_id", "")) not in existing_ids]
 
-    return parquet_path
+    if not new_rows:
+        print(f"  [STORAGE] No new events (all {len(rows)} already stored)")
+        return parquet_path
+
+    total = len(existing_ids) + len(new_rows)
+
+    # Step 2: append new rows only
+    pd = _try_import_pandas()
+    if pd is not None:
+        ok = _append_rows_to_parquet(new_rows, parquet_path)
+        if ok:
+            print(f"  [STORAGE] +{len(new_rows)} events -> {parquet_path} (parquet). Total: {total}")
+            return parquet_path
+
+    # CSV fallback: pure append, schema-safe
+    save_csv_generic(new_rows, csv_path)
+    print(f"  [STORAGE] +{len(new_rows)} events -> {csv_path} (csv). Total: {total}")
+    return csv_path
 
 
 # ============================================================

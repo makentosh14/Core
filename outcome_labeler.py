@@ -503,10 +503,149 @@ def event_is_mature(event_ts_ms: int) -> bool:
 # MAIN LABELING PASS
 # ============================================================
 
+def _load_minimal_rows(parquet_path: str) -> List[Dict]:
+    """
+    Load only the columns needed to decide what to label.
+    Avoids loading all 500+ indicator columns into RAM just for filtering.
+    Minimal columns: event_id, symbol, timestamp, price, direction,
+                     outcome_labeled, outcome_resolved
+    If parquet is unavailable falls back to full CSV load (acceptable for CSV).
+    """
+    MINIMAL_COLS = [
+        "event_id", "symbol", "timestamp", "price",
+        "direction", "outcome_labeled", "outcome_resolved",
+    ]
+    pd = None
+    try:
+        import pandas as _pd
+        pd = _pd
+    except ImportError:
+        pass
+
+    csv_path = parquet_path.replace(".parquet", ".csv")
+
+    if pd is not None and os.path.exists(parquet_path):
+        try:
+            df = pd.read_parquet(parquet_path, columns=MINIMAL_COLS)
+            return df.to_dict(orient="records")
+        except Exception:
+            pass
+
+    # CSV fallback: full load (CSV has no column selection without pandas)
+    if os.path.exists(csv_path):
+        rows = []
+        import csv as _csv
+        with open(csv_path, "r", newline="", encoding="utf-8") as f:
+            reader = _csv.DictReader(f)
+            for row in reader:
+                rows.append({k: row.get(k, "") for k in MINIMAL_COLS})
+        return rows
+
+    return []
+
+
+def _patch_parquet_outcomes(
+    parquet_path: str,
+    outcome_updates: Dict[str, Dict],
+) -> bool:
+    """
+    Patch outcome columns in-place without loading full indicator columns.
+
+    Strategy:
+    - Read parquet into DataFrame (fast columnar read).
+    - Set event_id as index.
+    - For each labeled event_id, update only the outcome columns.
+    - Write back.
+
+    For CSV fallback: full rewrite is unavoidable but only touches outcome cols.
+    Returns True if parquet was used, False if CSV was used.
+    """
+    if not outcome_updates:
+        return True
+
+    pd = None
+    try:
+        import pandas as _pd
+        pd = _pd
+    except ImportError:
+        pass
+
+    csv_path = parquet_path.replace(".parquet", ".csv")
+
+    if pd is not None and os.path.exists(parquet_path):
+        try:
+            df = pd.read_parquet(parquet_path)
+            df = df.set_index("event_id", drop=False)
+
+            # Collect all outcome column names from the updates
+            all_outcome_cols: dict = {}
+            for outcome in outcome_updates.values():
+                for k in outcome:
+                    all_outcome_cols.setdefault(k, None)
+
+            # Add missing outcome columns with None
+            for col in all_outcome_cols:
+                if col not in df.columns:
+                    df[col] = None
+
+            # Patch rows one at a time — only outcome columns touched
+            for eid, outcome in outcome_updates.items():
+                if eid in df.index:
+                    for col, val in outcome.items():
+                        df.at[eid, col] = val
+
+            df = df.reset_index(drop=True)
+            df.to_parquet(parquet_path, index=False, engine="pyarrow")
+            return True
+        except Exception as e:
+            print(f"  [WARN] Parquet patch failed: {e}, falling back to CSV patch")
+
+    # CSV fallback: load, patch, rewrite
+    if os.path.exists(csv_path):
+        import csv as _csv
+        rows = []
+        with open(csv_path, "r", newline="", encoding="utf-8") as f:
+            reader = _csv.DictReader(f)
+            fieldnames = list(reader.fieldnames or [])
+            rows = list(reader)
+
+        # Add any new outcome columns to fieldnames
+        for outcome in outcome_updates.values():
+            for k in outcome:
+                if k not in fieldnames:
+                    fieldnames.append(k)
+
+        # Patch rows
+        for row in rows:
+            eid = row.get("event_id", "")
+            if eid in outcome_updates:
+                row.update(outcome_updates[eid])
+
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = _csv.DictWriter(f, fieldnames=fieldnames,
+                                     extrasaction="ignore", restval="")
+            writer.writeheader()
+            writer.writerows(rows)
+
+    return False
+
+
 async def label_events(rerun: bool = False, label_all: bool = False):
     """
     Load research events → find unlabeled mature ones →
-    fetch future candles → compute outcomes → save back once.
+    fetch future candles → compute outcomes → patch file once.
+
+    MEMORY FIX vs old version:
+    Old: loaded ALL rows with ALL 500+ columns into RAM, built a full
+         DataFrame from all rows at save time → RAM spike → laptop crash.
+
+    New:
+    - _load_minimal_rows(): loads only 7 columns needed for filtering.
+    - Tracks only outcome dicts in memory (small — ~30 fields per event).
+    - _patch_parquet_outcomes(): patches only outcome columns in the
+      parquet file without touching indicator columns.
+    - outcome_labels.csv export: loads only labeled rows from parquet
+      using pandas column selection — no full load.
     """
     ensure_data_dir()
     parquet_path = os.path.join(DATA_DIR, "raw", RESEARCH_PARQUET)
@@ -515,20 +654,15 @@ async def label_events(rerun: bool = False, label_all: bool = False):
     print(f"  OUTCOME LABELER  (path-aware v2)")
     print(f"{'='*60}")
 
-    rows = load_parquet(parquet_path)
+    # Step 1: load only minimal columns for filtering (low RAM)
+    rows = _load_minimal_rows(parquet_path)
     if not rows:
         print("  No research events found. Run scanner first.")
         return
 
-    print(f"  Loaded {len(rows)} events")
+    print(f"  Loaded {len(rows)} events (minimal columns)")
 
-    # Build event_id → row index for O(1) mutation and dedup safety
-    id_to_row: Dict[str, Dict] = {}
-    for row in rows:
-        eid = row.get("event_id") or f"{row.get('symbol')}_{row.get('timestamp')}"
-        id_to_row[eid] = row
-
-    # Decide which events to label
+    # Step 2: decide which events to label
     to_label = []
     for row in rows:
         has_label = _safe_bool(row.get("outcome_labeled", False))
@@ -559,6 +693,9 @@ async def label_events(rerun: bool = False, label_all: bool = False):
         by_symbol.setdefault(sym, []).append(row)
     print(f"  Symbols to process:   {len(by_symbol)}")
 
+    # Step 3: fetch candles + compute outcomes
+    # outcome_updates: event_id → outcome dict (small, ~30 fields each)
+    outcome_updates: Dict[str, Dict] = {}
     labeled_count = 0
     timeout = aiohttp.ClientTimeout(total=API_TIMEOUT)
 
@@ -583,10 +720,8 @@ async def label_events(rerun: bool = False, label_all: bool = False):
 
                 outcome = compute_outcome(price, dire, future_candles)
 
-                # Mutate via the indexed reference
                 eid = row.get("event_id") or f"{sym}_{ts}"
-                if eid in id_to_row:
-                    id_to_row[eid].update(outcome)
+                outcome_updates[eid] = outcome
 
                 labeled_count += 1
                 if labeled_count % 50 == 0:
@@ -596,16 +731,46 @@ async def label_events(rerun: bool = False, label_all: bool = False):
     if labeled_count == 0:
         return
 
-    # Single dedup-safe save from the indexed dict
-    final_rows = list(id_to_row.values())
-    ok  = save_parquet(final_rows, parquet_path)
+    # Step 4: patch only outcome columns in the parquet file
+    # No full DataFrame load of all 500+ indicator columns
+    print(f"  Patching {len(outcome_updates)} rows in {parquet_path} ...")
+    ok  = _patch_parquet_outcomes(parquet_path, outcome_updates)
     fmt = "parquet" if ok else "csv"
-    print(f"  Saved {len(final_rows)} rows → {parquet_path} ({fmt})")
+    print(f"  Patched {len(outcome_updates)} rows → {parquet_path} ({fmt})")
 
-    labeled_rows = [r for r in final_rows if _safe_bool(r.get("outcome_labeled", False))]
+    # Step 5: export labeled rows to outcome_labels.csv
+    # Load only labeled rows using minimal read
     out_csv = os.path.join(DATA_DIR, "outcomes", "outcome_labels.csv")
-    save_csv_generic(labeled_rows, out_csv)
-    print(f"  Exported {len(labeled_rows)} labeled rows → {out_csv}")
+    pd = None
+    try:
+        import pandas as _pd
+        pd = _pd
+    except ImportError:
+        pass
+
+    csv_path = parquet_path.replace(".parquet", ".csv")
+    if pd is not None and os.path.exists(parquet_path):
+        try:
+            df = pd.read_parquet(parquet_path)
+            labeled_df = df[df["outcome_labeled"].astype(str).isin(["True", "1", "true"])]
+            labeled_rows = labeled_df.to_dict(orient="records")
+        except Exception:
+            labeled_rows = []
+    elif os.path.exists(csv_path):
+        labeled_rows = []
+        import csv as _csv
+        with open(csv_path, "r", newline="", encoding="utf-8") as f:
+            reader = _csv.DictReader(f)
+            for row in reader:
+                if _safe_bool(row.get("outcome_labeled", False)):
+                    labeled_rows.append(dict(row))
+    else:
+        labeled_rows = []
+
+    if labeled_rows:
+        save_csv_generic(labeled_rows, out_csv)
+        print(f"  Exported {len(labeled_rows)} labeled rows → {out_csv}")
+
     print("  Done.")
 
 

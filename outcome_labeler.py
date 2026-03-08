@@ -652,85 +652,114 @@ def _patch_parquet_outcomes(
     outcome_updates: Dict[str, Dict],
 ) -> bool:
     """
-    Patch outcome columns in-place without loading full indicator columns.
+    Patch outcome columns using streaming row-by-row processing.
 
-    Strategy:
-    - Read parquet into DataFrame (fast columnar read).
-    - Set event_id as index.
-    - For each labeled event_id, update only the outcome columns.
-    - Write back.
+    Never loads the full dataset into memory.
+    Reads the CSV in chunks of CHUNK_ROWS rows, patches matching event_ids,
+    writes to a temp file, then atomically replaces the original.
 
-    For CSV fallback: full rewrite is unavoidable but only touches outcome cols.
-    Returns True if parquet was used, False if CSV was used.
+    Returns True if parquet was produced, False if CSV was used.
     """
     if not outcome_updates:
         return True
 
-    pd = None
-    try:
-        import pandas as _pd
-        pd = _pd
-    except ImportError:
-        pass
+    import csv as _csv
+    import tempfile
 
+    CHUNK_ROWS = 5000  # rows per chunk — low RAM footprint
+
+    # Collect all outcome column names we will be writing
+    all_outcome_cols: list = []
+    seen_oc: set = set()
+    for outcome in outcome_updates.values():
+        for k in outcome:
+            if k not in seen_oc:
+                all_outcome_cols.append(k)
+                seen_oc.add(k)
+
+    # Determine which file to patch (real parquet or CSV)
     csv_path = parquet_path.replace(".parquet", ".csv")
 
-    if pd is not None and os.path.exists(parquet_path):
-        try:
-            df = pd.read_parquet(parquet_path)
-            df = df.set_index("event_id", drop=False)
+    # Choose source file
+    if _is_real_parquet(parquet_path):
+        source = parquet_path
+        use_parquet_source = True
+    elif os.path.exists(csv_path):
+        source = csv_path
+        use_parquet_source = False
+    elif os.path.exists(parquet_path):
+        # .parquet file that is actually CSV content
+        source = parquet_path
+        use_parquet_source = False
+    else:
+        print(f"  [WARN] No data file found to patch.")
+        return False
 
-            # Collect all outcome column names from the updates
-            all_outcome_cols: dict = {}
-            for outcome in outcome_updates.values():
-                for k in outcome:
-                    all_outcome_cols.setdefault(k, None)
+    # Read header first to build merged fieldnames
+    with open(source, "r", newline="", encoding="utf-8") as f:
+        reader = _csv.DictReader(f)
+        existing_fields = list(reader.fieldnames or [])
 
-            # Add missing outcome columns with None
-            for col in all_outcome_cols:
-                if col not in df.columns:
-                    df[col] = None
+    # Merge: existing fields + any new outcome columns
+    merged_fields = list(existing_fields)
+    for col in all_outcome_cols:
+        if col not in merged_fields:
+            merged_fields.append(col)
 
-            # Patch rows one at a time — only outcome columns touched
-            for eid, outcome in outcome_updates.items():
-                if eid in df.index:
-                    for col, val in outcome.items():
-                        df.at[eid, col] = val
+    # Stream: read source in chunks, patch, write to temp file
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".csv",
+                                        dir=os.path.dirname(source))
+    os.close(tmp_fd)
 
-            df = df.reset_index(drop=True)
-            df.to_parquet(parquet_path, index=False, engine="pyarrow")
-            return True
-        except Exception as e:
-            print(f"  [WARN] Parquet patch failed: {e}, falling back to CSV patch")
+    patched_count = 0
+    total_written = 0
 
-    # CSV fallback: load, patch, rewrite
-    if os.path.exists(csv_path):
-        import csv as _csv
-        rows = []
-        with open(csv_path, "r", newline="", encoding="utf-8") as f:
-            reader = _csv.DictReader(f)
-            fieldnames = list(reader.fieldnames or [])
-            rows = list(reader)
+    try:
+        with open(source, "r", newline="", encoding="utf-8") as fin,              open(tmp_path, "w", newline="", encoding="utf-8") as fout:
 
-        # Add any new outcome columns to fieldnames
-        for outcome in outcome_updates.values():
-            for k in outcome:
-                if k not in fieldnames:
-                    fieldnames.append(k)
-
-        # Patch rows
-        for row in rows:
-            eid = row.get("event_id", "")
-            if eid in outcome_updates:
-                row.update(outcome_updates[eid])
-
-        with open(csv_path, "w", newline="", encoding="utf-8") as f:
-            writer = _csv.DictWriter(f, fieldnames=fieldnames,
+            reader = _csv.DictReader(fin)
+            writer = _csv.DictWriter(fout, fieldnames=merged_fields,
                                      extrasaction="ignore", restval="")
             writer.writeheader()
-            writer.writerows(rows)
 
-    return False
+            chunk = []
+            for row in reader:
+                chunk.append(row)
+                if len(chunk) >= CHUNK_ROWS:
+                    for r in chunk:
+                        eid = r.get("event_id", "")
+                        if eid in outcome_updates:
+                            r.update(outcome_updates[eid])
+                            patched_count += 1
+                    writer.writerows(chunk)
+                    total_written += len(chunk)
+                    chunk = []
+
+            # Final partial chunk
+            if chunk:
+                for r in chunk:
+                    eid = r.get("event_id", "")
+                    if eid in outcome_updates:
+                        r.update(outcome_updates[eid])
+                        patched_count += 1
+                writer.writerows(chunk)
+                total_written += len(chunk)
+
+        # Atomic replace
+        if os.path.exists(source):
+            os.replace(tmp_path, source)
+        else:
+            os.rename(tmp_path, source)
+
+        print(f"  Patched {patched_count} rows, wrote {total_written} total rows.")
+
+    except Exception as e:
+        print(f"  [ERROR] Patch failed: {e}")
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        return False
+
+    return False  # CSV used, not parquet
 
 
 async def label_events(rerun: bool = False, label_all: bool = False):

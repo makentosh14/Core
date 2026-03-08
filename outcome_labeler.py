@@ -90,6 +90,83 @@ def _safe_bool(v) -> bool:
 # FUTURE CANDLE FETCH
 # ============================================================
 
+async def fetch_candles_range(
+    session:   aiohttp.ClientSession,
+    symbol:    str,
+    start_ts:  int,
+    end_ts:    int,
+    interval:  str = "5",
+    semaphore: asyncio.Semaphore = None,
+) -> List[Candle]:
+    """
+    Fetch all 5m candles for a symbol between start_ts and end_ts.
+    Bybit max limit=1000 per call. Paginates automatically if range is large.
+    Uses semaphore to limit concurrent requests.
+    """
+    url     = f"{BYBIT_API}/v5/market/kline"
+    all_candles: List[Candle] = []
+    fetch_end = end_ts
+
+    async def _one_page(start, end):
+        params = {
+            "category": "linear",
+            "symbol":   symbol,
+            "interval": interval,
+            "limit":    "1000",
+            "start":    str(start),
+            "end":      str(end),
+        }
+        for attempt in range(MAX_RETRIES):
+            try:
+                if semaphore:
+                    async with semaphore:
+                        async with session.get(url, params=params) as resp:
+                            data = await resp.json()
+                else:
+                    async with session.get(url, params=params) as resp:
+                        data = await resp.json()
+                if data.get("retCode") != 0:
+                    await asyncio.sleep(RATE_DELAY)
+                    continue
+                raw = data.get("result", {}).get("list", [])
+                return raw
+            except Exception:
+                if attempt < MAX_RETRIES - 1:
+                    await asyncio.sleep(RATE_DELAY * (attempt + 1))
+        return []
+
+    # Paginate: Bybit returns newest-first, so walk backwards
+    cursor_end = fetch_end
+    pages = 0
+    while pages < 20:  # safety cap: max 20 pages = 20000 candles per symbol
+        raw = await _one_page(start_ts, cursor_end)
+        if not raw:
+            break
+        for row in raw:
+            ts = int(row[0])
+            if start_ts <= ts <= fetch_end:
+                all_candles.append(Candle(
+                    timestamp = ts,
+                    open      = float(row[1]),
+                    high      = float(row[2]),
+                    low       = float(row[3]),
+                    close     = float(row[4]),
+                    volume    = float(row[5]),
+                ))
+        pages += 1
+        # If we got fewer than 1000 rows, we have all data
+        if len(raw) < 1000:
+            break
+        # Otherwise paginate: move cursor_end to just before oldest returned candle
+        oldest_ts = min(int(r[0]) for r in raw)
+        if oldest_ts <= start_ts:
+            break
+        cursor_end = oldest_ts - 1
+
+    all_candles.sort(key=lambda c: c.timestamp)
+    return all_candles
+
+
 async def fetch_candles_after(
     session:  aiohttp.ClientSession,
     symbol:   str,
@@ -99,7 +176,7 @@ async def fetch_candles_after(
 ) -> List[Candle]:
     """
     Fetch n_bars of 5m candles with timestamp strictly > after_ts.
-    Bybit returns newest-first; we sort to chronological order.
+    Kept for backward compatibility. Used in single-event mode.
     """
     url    = f"{BYBIT_API}/v5/market/kline"
     params = {
@@ -722,38 +799,86 @@ async def label_events(rerun: bool = False, label_all: bool = False):
     print(f"  Symbols to process:   {len(by_symbol)}")
 
     # Step 3: fetch candles + compute outcomes
-    # outcome_updates: event_id → outcome dict (small, ~30 fields each)
+    # KEY OPTIMISATION: fetch ONE candle range per symbol covering ALL its events.
+    # Instead of 1 API call per event (e.g. 500 calls for BTCUSDT), we fetch
+    # the full history once and slice it per event — 1 call per symbol.
+    # Then process symbols concurrently with a semaphore (20 parallel).
+
+    CONCURRENCY   = 20          # parallel symbol fetches
+    BAR_MS        = BAR_SECONDS * 1000
+    FUTURE_MS     = (FUTURE_BARS_TO_FETCH + 2) * BAR_MS  # buffer beyond last event
+
     outcome_updates: Dict[str, Dict] = {}
     labeled_count = 0
-    timeout = aiohttp.ClientTimeout(total=API_TIMEOUT)
+    timeout = aiohttp.ClientTimeout(total=max(API_TIMEOUT, 120))
+
+    async def process_symbol(
+        session:   aiohttp.ClientSession,
+        semaphore: asyncio.Semaphore,
+        sym:       str,
+        sym_rows:  list,
+    ):
+        nonlocal labeled_count
+        sym_rows.sort(key=lambda r: int(r.get("timestamp", 0)))
+        earliest_ts = int(sym_rows[0].get("timestamp", 0))
+        latest_ts   = int(sym_rows[-1].get("timestamp", 0))
+
+        # One fetch covers all events for this symbol
+        range_start = earliest_ts
+        range_end   = latest_ts + FUTURE_MS
+
+        all_candles = await fetch_candles_range(
+            session, sym, range_start, range_end,
+            semaphore=semaphore,
+        )
+
+        if not all_candles:
+            return
+
+        # Build a timestamp → candle index for fast slicing
+        # candles are sorted chronologically
+        ts_list = [c.timestamp for c in all_candles]
+
+        for row in sym_rows:
+            ts    = int(row.get("timestamp", 0))
+            price = float(row.get("price", 0) or 0)
+            dire  = str(row.get("direction", "") or "")
+
+            if price <= 0:
+                continue
+
+            # Find candles after this event's timestamp
+            # ts_list is sorted → bisect for O(log n) lookup
+            import bisect
+            idx = bisect.bisect_right(ts_list, ts)
+            future_candles = all_candles[idx: idx + FUTURE_BARS_TO_FETCH]
+
+            if len(future_candles) < 3:
+                continue
+
+            outcome = compute_outcome(price, dire, future_candles)
+            eid = row.get("event_id") or f"{sym}_{ts}"
+            outcome_updates[eid] = outcome
+            labeled_count += 1
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        for sym, sym_rows in by_symbol.items():
-            sym_rows.sort(key=lambda r: r.get("timestamp", 0))
-            for row in sym_rows:
-                ts    = int(row.get("timestamp", 0))
-                price = float(row.get("price", 0) or 0)
-                dire  = str(row.get("direction", "") or "")
+        semaphore = asyncio.Semaphore(CONCURRENCY)
+        symbols   = list(by_symbol.items())
+        total_sym = len(symbols)
 
-                if price <= 0:
-                    continue
-
-                future_candles = await fetch_candles_after(
-                    session, sym, ts, n_bars=FUTURE_BARS_TO_FETCH
+        # Process in batches so we can print progress
+        BATCH = 20
+        for batch_start in range(0, total_sym, BATCH):
+            batch = symbols[batch_start: batch_start + BATCH]
+            tasks = [
+                asyncio.create_task(
+                    process_symbol(session, semaphore, sym, sym_rows)
                 )
-                await asyncio.sleep(RATE_DELAY)
-
-                if len(future_candles) < 3:
-                    continue
-
-                outcome = compute_outcome(price, dire, future_candles)
-
-                eid = row.get("event_id") or f"{sym}_{ts}"
-                outcome_updates[eid] = outcome
-
-                labeled_count += 1
-                if labeled_count % 50 == 0:
-                    print(f"  Labeled {labeled_count} / {len(to_label)} ...")
+                for sym, sym_rows in batch
+            ]
+            await asyncio.gather(*tasks)
+            done_sym = min(batch_start + BATCH, total_sym)
+            print(f"  Symbols done: {done_sym}/{total_sym}  |  Events labeled: {labeled_count}")
 
     print(f"\n  Labeled {labeled_count} events.")
     if labeled_count == 0:

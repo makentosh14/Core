@@ -144,36 +144,118 @@ def _rank_score(wr: float, n: int) -> float:
 # LOAD AND SPLIT
 # ============================================================
 
+# Columns the analyzer actually needs — drop all others to save RAM.
+# Indicator columns are added dynamically from the header (bool + numeric only).
+_ANALYSIS_META_COLS = {
+    "event_id", "symbol", "timestamp", "direction", "tier",
+    "market_regime", "setup_type", "vol_state", "trend_state", "structure_state",
+    "signal_type", "confidence", "pump_score", "dump_score", "net_score",
+    "outcome_labeled", "outcome_resolved",
+    "outcome_max_up_pct", "outcome_max_dn_pct", "outcome_bars_to_sig",
+    "outcome_pct_1bar", "outcome_pct_3bar", "outcome_pct_6bar",
+    "outcome_pct_8bar", "outcome_pct_12bar",
+    "outcome_hit_up2", "outcome_hit_up3", "outcome_hit_up5", "outcome_hit_up10",
+    "outcome_hit_dn2", "outcome_hit_dn3", "outcome_hit_dn5", "outcome_hit_dn10",
+    "outcome_went_against", "outcome_first_move",
+    "outcome_path_type", "outcome_entry_quality", "outcome_early_vs_signal",
+    "outcome_early_strength", "outcome_intrabar_adverse", "outcome_speed",
+    "outcome_peak_bar", "outcome_symmetry", "outcome_drawdown_bw",
+}
+
+def _is_analysis_col(col: str, all_cols: set) -> bool:
+    """
+    Keep meta/outcome columns + indicator columns (5m_/15m_/1h_/4h_/mtf_/v3_).
+    Drop all other wide columns (raw OHLCV, scan internals, etc.).
+    """
+    if col in _ANALYSIS_META_COLS:
+        return True
+    prefixes = ("5m_", "15m_", "1h_", "4h_", "mtf_", "v3_")
+    return any(col.startswith(p) for p in prefixes)
+
+
+def _load_labeled_csv_streaming(
+    direction:    Optional[str] = None,
+    regime:       Optional[str] = None,
+    min_tier:     int           = 0,
+    signals_only: bool          = False,
+) -> List[Dict]:
+    """
+    Load labeled events keeping ONLY columns needed for analysis.
+    Drops ~450 raw indicator/OHLCV columns that analysis never uses.
+    This cuts per-row RAM by ~90%, allowing 1.2M rows to fit in memory.
+
+    Source priority:
+    1. outcome_labels.csv  — already filtered to labeled rows, much smaller
+    2. research_events.csv — full file, filtered on load
+    """
+    labels_csv   = os.path.join(DATA_DIR, "outcomes", "outcome_labels.csv")
+    parquet_path = os.path.join(DATA_DIR, "raw", RESEARCH_PARQUET)
+    csv_path     = parquet_path.replace(".parquet", ".csv")
+
+    if os.path.exists(labels_csv):
+        source       = labels_csv
+        pre_filtered = True
+    elif os.path.exists(csv_path):
+        source       = csv_path
+        pre_filtered = False
+    elif os.path.exists(parquet_path):
+        source       = parquet_path
+        pre_filtered = False
+    else:
+        print("    No labeled data file found.")
+        return []
+
+    size_mb = os.path.getsize(source) / 1024 / 1024
+    print(f"    Source: {os.path.basename(source)} ({size_mb:.0f} MB)")
+
+    result = []
+    kept_cols: Optional[set] = None   # built from first row
+
+    with open(source, "r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        all_cols = set(reader.fieldnames or [])
+
+        # Decide which columns to keep once (from header)
+        kept_cols = {c for c in all_cols if _is_analysis_col(c, all_cols)}
+
+        for i, row in enumerate(reader):
+            if not pre_filtered:
+                if not _safe_bool(row.get("outcome_labeled", False)):
+                    continue
+            if signals_only and not row.get("direction"):
+                continue
+            if direction and row.get("direction") != direction:
+                continue
+            if regime and row.get("market_regime") != regime:
+                continue
+            if min_tier and _safe_int(row.get("tier", 0)) < min_tier:
+                continue
+            # Keep only analysis columns — drops ~450 wide columns
+            result.append({k: row[k] for k in kept_cols if k in row})
+            if i > 0 and i % 200000 == 0:
+                print(f"    ... read {i} rows")
+
+    print(f"    Loaded {len(result)} rows ({len(kept_cols)} cols each)")
+    return result
+
+
 def load_all_labeled_events(
     direction: Optional[str] = None,
     regime:    Optional[str] = None,
     min_tier:  int           = 0,
 ) -> List[Dict]:
-    """Load all labeled events with optional filters."""
-    parquet_path = os.path.join(DATA_DIR, "raw", RESEARCH_PARQUET)
-    rows = load_parquet(parquet_path)
-    result = []
-    for row in rows:
-        if not _safe_bool(row.get("outcome_labeled", False)):
-            continue
-        if direction and row.get("direction") != direction:
-            continue
-        if regime and row.get("market_regime") != regime:
-            continue
-        if min_tier and _safe_int(row.get("tier", 0)) < min_tier:
-            continue
-        result.append(row)
-    return result
+    """Load labeled signal events with optional filters."""
+    return _load_labeled_csv_streaming(
+        direction=direction, regime=regime, min_tier=min_tier, signals_only=False
+    )
 
 
 def load_all_rows_for_baseline() -> List[Dict]:
     """
-    Load ALL labeled rows (including non-signal baseline events)
-    for base-rate computation.
+    Load ALL labeled rows for base-rate computation.
+    Reads outcome_labels.csv, not the full 2.6 GB research_events file.
     """
-    parquet_path = os.path.join(DATA_DIR, "raw", RESEARCH_PARQUET)
-    rows = load_parquet(parquet_path)
-    return [r for r in rows if _safe_bool(r.get("outcome_labeled", False))]
+    return _load_labeled_csv_streaming(signals_only=False)
 
 
 def split_train_test(

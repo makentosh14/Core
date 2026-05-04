@@ -1,21 +1,14 @@
 # score.py - Enhanced with Advanced Pattern Detection Integration
-# FIXED VERSION - Backscan-optimized weights (9,343 events analyzed Feb 2026)
+# QUALITY PATCH (May 2026) — Win-rate optimization
+# =============================================================================
 # Changes vs previous version:
-#   - macd weight: 1.2 → 0.6 (MACD cross fires only 3-4% before pumps)
-#   - macd_momentum: 0.8 → 1.2 (MACD hist direction has +7.4% pump-diff)
-#   - ema_ribbon: 0.8 → 1.0 (ribbon trend more stable signal)
-#   - volume_spike: 1.0 → 0.7 (10% hit rate, threshold too strict)
-#   - supertrend: 1.0 → 1.1 (ST +6.4% diff, slightly underweighted)
-#   - supertrend_mtf: 1.0 → 1.3 (4h MTF alignment is THE most predictive factor)
-#   - rsi: 0.8 → 0.7 (RSI near 50 at pump start)
-#   - rsi_mtf: 0.9 → 1.1 (MTF RSI confluence +5-6% diff)
-#   - bollinger_squeeze: 0.8 → 0.0 (REMOVED - anti-correlated with longs!)
-#   - vwap: 0.6 → 0.8 (above_vwap +6.3% diff)
-#   - whale: 1.0 → 0.8 (normalize)
-#   - whale_advanced: 1.1 → 1.0 (normalize)
-#   - Volume spike threshold: 2.5x → 1.8x (avg vol_ratio at pump = 2.09x)
-#   - Added get_4h_trend_gate() — 4h momentum gate applied before final return
-#   - Replaced hard strong_count < 2 rejection with soft 30% penalty
+#   - WEIGHTS rebalanced to favor proven backscan-edge indicators
+#   - determine_direction(): stricter consensus check (was total > 1.0)
+#   - check_4h_alignment_veto(): hard veto for trades fighting 4h trend
+#   - check_not_chasing(): blocks already-extended entries
+#   - calculate_confidence(): tighter baseline + counter-trend penalties
+#   - _apply_strong_indicator_gate(): require ≥ 2 *aligned* strong indicators
+# =============================================================================
 
 from logger import log
 from rsi import (
@@ -63,39 +56,49 @@ from pattern_context_analyzer import pattern_context_analyzer
 from divergence_detector import divergence_detector
 import numpy as np
 
-# ── WEIGHTS (backscan-optimized) ─────────────────────────────────────────────
+
+# ── WEIGHTS (quality-tuned, May 2026) ────────────────────────────────────────
+# Punishes single-TF noise (single MACD/EMA cross), rewards confluence
+# (MTF Supertrend, MTF RSI), divergences, and whale activity.
 WEIGHTS = {
-    "macd":               0.6,   # was 1.2 — cross fires only 3-4% before pumps
-    "macd_divergence":    1.0,
-    "macd_momentum":      1.2,   # was 0.8 — hist direction +7.4% diff, best MACD signal
-    "ema":                0.9,   # was 1.0
-    "ema_ribbon":         1.0,   # was 0.8
-    "ema_squeeze":        0.6,
-    "volume_spike":       0.7,   # was 1.0 — 10% hit rate before pumps
-    "volume_climax":      1.1,
+    # Momentum / trend
+    "macd":               0.5,   # ↓ 0.6 — single cross alone is weak
+    "macd_divergence":    1.1,   # ↑ 1.0 — divergences higher quality
+    "macd_momentum":      1.3,   # ↑ 1.2 — best MACD signal
+    "ema":                0.7,   # ↓ 0.9 — single-TF EMA cross overfires
+    "ema_ribbon":         1.1,   # ↑ 1.0 — ribbon trend more reliable
+    "ema_squeeze":        0.5,   # ↓ 0.6 — mostly noise on alts
+    # Volume
+    "volume_spike":       0.8,   # ↑ 0.7 — combined with quality check
+    "volume_climax":      1.2,   # ↑ 1.1
     "volume_profile":     0.5,
-    "vwap":               0.8,   # was 0.6 — above_vwap +6.3% diff
-    "supertrend":         1.1,   # was 1.0 — ST +6.4% diff
-    "supertrend_squeeze": 0.7,
-    "supertrend_mtf":     1.3,   # was 1.0 — 4h MTF alignment is most predictive
-    "rsi":                0.7,   # was 0.8 — RSI near 50 at pump start
-    "rsi_divergence":     1.0,
-    "stoch_rsi":          0.8,
-    "rsi_mtf":            1.1,   # was 0.9 — MTF RSI confluence +5-6% diff
-    "bollinger":          0.6,
-    "bollinger_squeeze":  0.0,   # was 0.8 — REMOVED: anti-correlated with longs (-2.1%)
-    "band_walk":          0.9,
-    "pattern":            0.8,
-    "pattern_cluster":    0.4,
-    "pattern_quality":    0.6,
-    "pattern_confluence": 0.5,
-    "divergence":         0.6,
-    "slow_breakout":      0.8,
-    "whale":              0.8,   # was 1.0
-    "whale_advanced":     1.0,   # was 1.1
-    "momentum":           1.2,
+    # VWAP / supertrend
+    "vwap":               0.9,   # ↑ 0.8 — strong predictor
+    "supertrend":         1.2,   # ↑ 1.1
+    "supertrend_squeeze": 0.6,   # ↓ 0.7
+    "supertrend_mtf":     1.5,   # ↑ 1.3 — MTF alignment is THE edge
+    # RSI family
+    "rsi":                0.6,   # ↓ 0.7 — single RSI is weak
+    "rsi_divergence":     1.2,   # ↑ 1.0 — divergences strong
+    "stoch_rsi":          0.7,   # ↓ 0.8
+    "rsi_mtf":            1.3,   # ↑ 1.1 — MTF confluence strong
+    # Bollinger / band walk
+    "bollinger":          0.5,   # ↓ 0.6
+    "bollinger_squeeze":  0.0,   # REMOVED — anti-correlated with longs
+    "band_walk":          1.0,   # ↑ 0.9 — band walks confirm trend
+    # Patterns
+    "pattern":            0.7,   # ↓ 0.8 — patterns alone misleading
+    "pattern_cluster":    0.5,   # ↑ 0.4
+    "pattern_quality":    0.7,   # ↑ 0.6
+    "pattern_confluence": 0.6,   # ↑ 0.5
+    # Other
+    "divergence":         0.7,   # ↑ 0.6
+    "slow_breakout":      0.9,   # ↑ 0.8
+    "whale":              0.8,
+    "whale_advanced":     1.1,   # ↑ 1.0 — high-edge
+    "momentum":           1.3,   # ↑ 1.2
     "stealth":            0.8,
-    "strong_stealth":     1.0,
+    "strong_stealth":     1.1,   # ↑ 1.0
 }
 
 # Trade type to timeframe mapping
@@ -113,9 +116,13 @@ MIN_TF_REQUIRED = {
 
 MAX_PATTERN_CONTRIBUTION = 2.0
 
-# Volume spike threshold — lowered from 2.5x because avg vol_ratio at pump events = 2.09x
+# Volume spike threshold — backscan: avg vol_ratio at pump = 2.09x
 VOLUME_SPIKE_THRESHOLD = 1.8
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MOMENTUM HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
 
 def safe_detect_momentum_strength(candles):
     """Safe wrapper for detect_momentum_strength"""
@@ -173,14 +180,13 @@ def detect_momentum_strength(candles, lookback=5):
     return has_momentum, direction, strength
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 4H TREND GATE — backscan: 4h is most predictive (+7-8% diff)
+# ─────────────────────────────────────────────────────────────────────────────
+
 def get_4h_trend_gate(candles_by_timeframe):
     """
     Returns a score adjustment based on 4h momentum indicators.
-    4h is the most predictive timeframe per backscan (9,343 events):
-      4h_mom_pos   → +8.2% pump-diff (highest single indicator)
-      4h_macd_hist → +7.4% pump-diff
-      4h_st_bull   → +6.4% pump-diff
-
     Called in score_symbol() before the final return.
     Returns: (adjustment: float, reason: str)
     """
@@ -238,160 +244,90 @@ def get_4h_trend_gate(candles_by_timeframe):
     return round(adjustment, 2), ", ".join(reasons)
 
 
-def enhanced_pattern_scoring(candles, tf_label, score, indicator_scores, used_indicators):
-    """Enhanced pattern scoring with advanced pattern detection"""
+def check_4h_alignment_veto(candles_by_timeframe, direction):
+    """
+    QUALITY PATCH: Hard-veto trades fighting the 4h trend.
+    Long against 2+ bearish 4h signals → reject.
+    Returns (allow: bool, reason: str).
+    """
+    candles_4h = (
+        candles_by_timeframe.get("240", []) or
+        candles_by_timeframe.get("4h", []) or
+        []
+    )
+    if not candles_4h or len(candles_4h) < 20:
+        return True, "no_4h_data"  # Don't punish data gaps
 
-    pattern_score_total = 0
+    try:
+        st_4h = calculate_supertrend_signal(candles_4h)
+        macd_mom_4h = get_macd_momentum(candles_4h)
+        closes_4h = [float(c["close"]) for c in candles_4h]
+        mom_10 = closes_4h[-1] - closes_4h[-11] if len(closes_4h) >= 12 else 0
 
-    # Detect primary pattern
-    pattern = detect_pattern(candles)
+        bearish_signals_4h = sum([
+            st_4h == "bearish",
+            macd_mom_4h < -0.3,
+            mom_10 < 0,
+        ])
+        bullish_signals_4h = sum([
+            st_4h == "bullish",
+            macd_mom_4h > 0.3,
+            mom_10 > 0,
+        ])
 
-    if pattern:
-        pattern_strength = analyze_pattern_strength(pattern, candles)
-        pattern_direction = get_pattern_direction(pattern)
-        base_pattern_score = WEIGHTS.get("pattern", 0.8)
+        if direction == "Long" and bearish_signals_4h >= 2:
+            return False, f"4h_bearish_veto({bearish_signals_4h}/3)"
+        if direction == "Short" and bullish_signals_4h >= 2:
+            return False, f"4h_bullish_veto({bullish_signals_4h}/3)"
 
-        if pattern in ["spinning_top", "doji", "harami"]:
-            adjusted_score = base_pattern_score * pattern_strength * 0.5
-            pattern_score_total += adjusted_score
-            indicator_scores[f"{tf_label}_pattern_{pattern}"] = adjusted_score
-        else:
-            adjusted_score = base_pattern_score * pattern_strength
-            if pattern_direction == "bullish":
-                pattern_score_total += adjusted_score
-                indicator_scores[f"{tf_label}_pattern_{pattern}"] = adjusted_score
-            elif pattern_direction == "bearish":
-                pattern_score_total -= adjusted_score
-                indicator_scores[f"{tf_label}_pattern_{pattern}"] = -adjusted_score
-            else:
-                pattern_score_total += adjusted_score * 0.3
-                indicator_scores[f"{tf_label}_pattern_{pattern}"] = adjusted_score * 0.3
-
-        used_indicators.add(f"pattern_{pattern}")
-
-        # AFTER — filter cluster by direction alignment before applying bonus
-        pattern_cluster = detect_pattern_cluster(candles, lookback=10)
-        if len(pattern_cluster) >= 2:
-            cluster_patterns = [p['pattern'] for p in pattern_cluster]
-
-            # Count how many cluster patterns align with Long direction
-            bullish_count = sum(1 for p in cluster_patterns if p in REVERSAL_PATTERNS["bullish"] or p in CONTINUATION_PATTERNS["bullish"])
-            bearish_count = sum(1 for p in cluster_patterns if p in REVERSAL_PATTERNS["bearish"] or p in CONTINUATION_PATTERNS["bearish"])
-
-            aligned_count = bullish_count  # Change to bearish_count for Short scoring
-            # For direction-aware scoring, pass direction into this function or check tf_scores sign
-
-            if bullish_count >= 2:
-                cluster_bonus = WEIGHTS["pattern_cluster"] * bullish_count
-                score += cluster_bonus
-                indicator_scores[f"{tf_label}_pattern_cluster_bullish"] = cluster_bonus
-                used_indicators.add("pattern_cluster")
-                log(f"📊 Bullish pattern cluster on {tf_label}: {cluster_patterns} (+{cluster_bonus:.2f})")
-            elif bearish_count >= 2:
-                cluster_bonus = WEIGHTS["pattern_cluster"] * bearish_count
-                score -= cluster_bonus
-                indicator_scores[f"{tf_label}_pattern_cluster_bearish"] = -cluster_bonus
-                used_indicators.add("pattern_cluster")
-                log(f"📊 Bearish pattern cluster on {tf_label}: {cluster_patterns} (-{cluster_bonus:.2f})")
-            else:
-                log(f"📊 Mixed/neutral pattern cluster on {tf_label}: {cluster_patterns} (no bonus)")
-
-    # Scan for all patterns for comprehensive analysis
-    all_patterns = get_all_patterns(candles)
-    pattern_count = sum(1 for detected in all_patterns.values() if detected)
-
-    if pattern_count >= 3:
-        confluence_bonus = WEIGHTS["pattern_confluence"]
-        score += confluence_bonus
-        indicator_scores[f"{tf_label}_pattern_confluence"] = confluence_bonus
-        used_indicators.add("pattern_confluence")
-        detected_patterns = [name for name, detected in all_patterns.items() if detected]
-        log(f"📊 Pattern confluence on {tf_label}: {detected_patterns}")
-
-    # Apply cap to total pattern contribution
-    capped_pattern_score = min(pattern_score_total, MAX_PATTERN_CONTRIBUTION)
-    score += capped_pattern_score
-
-    return score, indicator_scores, used_indicators
+        return True, "4h_aligned"
+    except Exception as e:
+        log(f"⚠️ 4h veto check failed: {e}", level="WARN")
+        return True, "4h_check_error"  # Fail open
 
 
-def determine_direction(tf_scores):
-    """Determine trading direction from timeframe scores"""
-    if not tf_scores:
-        return None
+# ─────────────────────────────────────────────────────────────────────────────
+# ANTI-CHASE FILTER — block already-extended entries
+# ─────────────────────────────────────────────────────────────────────────────
 
-    total_score = sum(tf_scores.values())
-    if total_score > 1.0:
-        return "Long"
-    elif total_score < -1.0:
-        return "Short"
-    return None
-
-
-def determine_direction_with_pattern_priority(tf_scores, candles_by_timeframe):
-    """Determine direction with pattern taking priority"""
-    basic_direction = determine_direction(tf_scores)
-
-    for tf in ['15', '5', '1']:
-        if tf in candles_by_timeframe and candles_by_timeframe[tf]:
-            candles = candles_by_timeframe[tf]
-            pattern = detect_pattern(candles)
-            if pattern:
-                pattern_dir = get_pattern_direction(pattern)
-                if pattern_dir in ["bullish", "bearish"]:
-                    strength = analyze_pattern_strength(pattern, candles)
-                    if strength > 0.7:
-                        return "Long" if pattern_dir == "bullish" else "Short"
-
-    return basic_direction
-
-
-def calculate_confidence(score, tf_scores, market_context, trade_type):
-    """Calculate confidence percentage for a trade signal"""
-    if not tf_scores:
-        return 0
-
-    # Base: score 8 → 60%, score 10 → 72%, score 14 → 85% cap
-    base_confidence = min(score * 7.5, 85)
-
-    # TF alignment bonus: up to 15 points
-    tf_alignment = sum(1 for v in tf_scores.values() if v > 0) / max(len(tf_scores), 1)
-    alignment_bonus = tf_alignment * 15
-
-    # Trade type bonus
-    type_bonus = 0
+def check_not_chasing(candles_by_timeframe, direction, trade_type):
+    """
+    QUALITY PATCH: Don't enter when price already moved 1%+ in direction
+    in the last few candles. You're chasing the move, not catching it.
+    Returns (allow: bool, reason: str).
+    """
     if trade_type == "Scalp":
-        type_bonus = 5
+        tf, max_recent_move_pct, lookback = "1", 1.0, 3
     elif trade_type == "Intraday":
-        type_bonus = 3
+        tf, max_recent_move_pct, lookback = "5", 1.8, 3
+    else:  # Swing
+        tf, max_recent_move_pct, lookback = "15", 3.0, 4
 
-    # Market context bonus
-    market_bonus = 0
-    if market_context:
-        btc_trend = market_context.get("btc_trend", "neutral")
-        if btc_trend == "bullish":
-            market_bonus = 5
-        elif btc_trend == "bearish":
-            market_bonus = -5
+    candles = candles_by_timeframe.get(tf, [])
+    if len(candles) < lookback + 1:
+        return True, "insufficient_data"
 
-    confidence = base_confidence + alignment_bonus + type_bonus + market_bonus
-    return min(int(confidence), 100)
+    try:
+        ref_close = float(candles[-(lookback + 1)]["close"])
+        cur_close = float(candles[-1]["close"])
+        if ref_close <= 0:
+            return True, "bad_price"
+
+        move_pct = ((cur_close - ref_close) / ref_close) * 100
+
+        if direction == "Long" and move_pct > max_recent_move_pct:
+            return False, f"chasing_long(+{move_pct:.2f}%)"
+        if direction == "Short" and move_pct < -max_recent_move_pct:
+            return False, f"chasing_short({move_pct:.2f}%)"
+
+        return True, f"entry_clean({move_pct:+.2f}%)"
+    except Exception:
+        return True, "chase_check_error"
 
 
-def has_pump_potential(candles_by_timeframe, direction):
-    """Check if symbol shows pump potential"""
-    if direction != "Long":
-        return False
-
-    for tf in ['1', '5', '15']:
-        if tf in candles_by_timeframe and candles_by_timeframe[tf]:
-            candles = candles_by_timeframe[tf]
-            if len(candles) >= 10:
-                has_momentum, mom_dir, strength = safe_detect_momentum_strength(candles)
-                if has_momentum and mom_dir == "bullish" and strength > 0.7:
-                    return True
-    return False
-
+# ─────────────────────────────────────────────────────────────────────────────
+# VOLUME HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
 
 def get_minimum_volume_threshold(trade_type):
     """Get minimum volume threshold based on trade type"""
@@ -439,6 +375,265 @@ def calculate_volume_penalty(candles, trade_type):
         return min(shortfall * 0.5, 1.5)
     return 0
 
+
+def has_pump_potential(candles_by_timeframe, direction):
+    """Check if symbol shows pump potential"""
+    if direction != "Long":
+        return False
+
+    for tf in ['1', '5', '15']:
+        if tf in candles_by_timeframe and candles_by_timeframe[tf]:
+            candles = candles_by_timeframe[tf]
+            if len(candles) >= 10:
+                has_momentum, mom_dir, strength = safe_detect_momentum_strength(candles)
+                if has_momentum and mom_dir == "bullish" and strength > 0.7:
+                    return True
+    return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DIRECTION (QUALITY PATCH — stricter consensus)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def determine_direction(tf_scores):
+    """
+    QUALITY PATCH: Stricter consensus check.
+    Requires:
+      - total bias > 2.0 (was > 1.0)
+      - majority of TFs agreeing
+      - no strongly opposing TF (>2.0)
+    Returns "Long", "Short", or None (no clean direction = no trade).
+    """
+    if not tf_scores:
+        return None
+
+    values = list(tf_scores.values())
+    total_score = sum(values)
+    n = len(values)
+
+    if n == 0:
+        return None
+
+    bullish_tfs = sum(1 for v in values if v > 0.5)
+    bearish_tfs = sum(1 for v in values if v < -0.5)
+
+    has_strong_bearish_tf = any(v < -2.0 for v in values)
+    has_strong_bullish_tf = any(v > 2.0 for v in values)
+
+    # Long requires total > 2.0, more bullish than bearish TFs,
+    # no strong bearish TF, and ≥ 50% TFs aligned
+    if total_score > 2.0 and bullish_tfs > bearish_tfs and not has_strong_bearish_tf:
+        if bullish_tfs / max(n, 1) >= 0.5:
+            return "Long"
+
+    # Short — same logic in reverse
+    if total_score < -2.0 and bearish_tfs > bullish_tfs and not has_strong_bullish_tf:
+        if bearish_tfs / max(n, 1) >= 0.5:
+            return "Short"
+
+    return None  # No clean direction = no trade
+
+
+def determine_direction_with_pattern_priority(tf_scores, candles_by_timeframe):
+    """Determine direction with strong pattern taking priority"""
+    basic_direction = determine_direction(tf_scores)
+
+    for tf in ['15', '5', '1']:
+        if tf in candles_by_timeframe and candles_by_timeframe[tf]:
+            candles = candles_by_timeframe[tf]
+            pattern = detect_pattern(candles)
+            if pattern:
+                pattern_dir = get_pattern_direction(pattern)
+                if pattern_dir in ["bullish", "bearish"]:
+                    strength = analyze_pattern_strength(pattern, candles)
+                    if strength > 0.7:
+                        return "Long" if pattern_dir == "bullish" else "Short"
+
+    return basic_direction
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIDENCE (QUALITY PATCH — tighter baseline + counter-trend penalty)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def calculate_confidence(score, tf_scores, market_context, trade_type):
+    """
+    QUALITY PATCH: Tighter confidence — must EARN the 65% gate.
+    Old baseline: score * 7.5 (score 9 → 67.5% trivially)
+    New baseline: score * 6.0 (score 9 → 54%, must earn bonuses)
+    """
+    if not tf_scores:
+        return 0
+
+    # Tighter baseline
+    base_confidence = min(score * 6.0, 78)
+
+    # TF alignment — reward strong consensus, not just majority
+    if len(tf_scores) > 0:
+        positive_tfs = sum(1 for v in tf_scores.values() if v > 0.5)
+        negative_tfs = sum(1 for v in tf_scores.values() if v < -0.5)
+        consensus = max(positive_tfs, negative_tfs) / len(tf_scores)
+        if consensus >= 0.75:
+            alignment_bonus = 12
+        elif consensus >= 0.5:
+            alignment_bonus = 6
+        else:
+            alignment_bonus = -3   # Mixed signals = penalty
+    else:
+        alignment_bonus = 0
+
+    # Trade type bonus — slightly reduced
+    type_bonus = {"Scalp": 3, "Intraday": 2, "Swing": 1}.get(trade_type, 0)
+
+    # Market context bonus — counter-trend gets harsh penalty
+    market_bonus = 0
+    if market_context:
+        btc_trend = market_context.get("btc_trend", "neutral")
+        regime = market_context.get("regime", "").lower()
+        if btc_trend == "bullish" and trade_type != "Short":
+            market_bonus = 4
+        elif btc_trend == "bearish" and trade_type == "Short":
+            market_bonus = 4
+        elif btc_trend in ("bearish", "downtrend"):
+            market_bonus = -8   # Counter-trend long = harsh penalty
+        elif regime == "ranging":
+            market_bonus = -3
+
+    confidence = base_confidence + alignment_bonus + type_bonus + market_bonus
+    return max(0, min(int(confidence), 100))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PATTERN SCORING
+# ─────────────────────────────────────────────────────────────────────────────
+
+def enhanced_pattern_scoring(candles, tf_label, score, indicator_scores, used_indicators):
+    """Enhanced pattern scoring with advanced pattern detection"""
+
+    pattern_score_total = 0
+
+    # Detect primary pattern
+    pattern = detect_pattern(candles)
+
+    if pattern:
+        pattern_strength = analyze_pattern_strength(pattern, candles)
+        pattern_direction = get_pattern_direction(pattern)
+        base_pattern_score = WEIGHTS.get("pattern", 0.7)
+
+        if pattern in ["spinning_top", "doji", "harami"]:
+            adjusted_score = base_pattern_score * pattern_strength * 0.5
+            pattern_score_total += adjusted_score
+            indicator_scores[f"{tf_label}_pattern_{pattern}"] = adjusted_score
+        else:
+            adjusted_score = base_pattern_score * pattern_strength
+            if pattern_direction == "bullish":
+                pattern_score_total += adjusted_score
+                indicator_scores[f"{tf_label}_pattern_{pattern}"] = adjusted_score
+            elif pattern_direction == "bearish":
+                pattern_score_total -= adjusted_score
+                indicator_scores[f"{tf_label}_pattern_{pattern}"] = -adjusted_score
+            else:
+                pattern_score_total += adjusted_score * 0.3
+                indicator_scores[f"{tf_label}_pattern_{pattern}"] = adjusted_score * 0.3
+
+        used_indicators.add(f"pattern_{pattern}")
+
+        # Direction-aware cluster scoring
+        pattern_cluster = detect_pattern_cluster(candles, lookback=10)
+        if len(pattern_cluster) >= 2:
+            cluster_patterns = [p['pattern'] for p in pattern_cluster]
+
+            bullish_count = sum(
+                1 for p in cluster_patterns
+                if p in REVERSAL_PATTERNS["bullish"] or p in CONTINUATION_PATTERNS["bullish"]
+            )
+            bearish_count = sum(
+                1 for p in cluster_patterns
+                if p in REVERSAL_PATTERNS["bearish"] or p in CONTINUATION_PATTERNS["bearish"]
+            )
+
+            if bullish_count >= 2:
+                cluster_bonus = WEIGHTS["pattern_cluster"] * bullish_count
+                score += cluster_bonus
+                indicator_scores[f"{tf_label}_pattern_cluster_bullish"] = cluster_bonus
+                used_indicators.add("pattern_cluster")
+                log(f"📊 Bullish pattern cluster on {tf_label}: {cluster_patterns} (+{cluster_bonus:.2f})")
+            elif bearish_count >= 2:
+                cluster_bonus = WEIGHTS["pattern_cluster"] * bearish_count
+                score -= cluster_bonus
+                indicator_scores[f"{tf_label}_pattern_cluster_bearish"] = -cluster_bonus
+                used_indicators.add("pattern_cluster")
+                log(f"📊 Bearish pattern cluster on {tf_label}: {cluster_patterns} (-{cluster_bonus:.2f})")
+            else:
+                log(f"📊 Mixed/neutral pattern cluster on {tf_label}: {cluster_patterns} (no bonus)")
+
+    # All-pattern confluence
+    all_patterns = get_all_patterns(candles)
+    pattern_count = sum(1 for detected in all_patterns.values() if detected)
+
+    if pattern_count >= 3:
+        confluence_bonus = WEIGHTS["pattern_confluence"]
+        score += confluence_bonus
+        indicator_scores[f"{tf_label}_pattern_confluence"] = confluence_bonus
+        used_indicators.add("pattern_confluence")
+        detected_patterns = [name for name, detected in all_patterns.items() if detected]
+        log(f"📊 Pattern confluence on {tf_label}: {detected_patterns}")
+
+    capped_pattern_score = min(pattern_score_total, MAX_PATTERN_CONTRIBUTION)
+    score += capped_pattern_score
+
+    return score, indicator_scores, used_indicators
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STRONG INDICATOR GATE (QUALITY PATCH)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _apply_strong_indicator_gate(symbol, original_score, indicator_scores, tf_scores):
+    """
+    QUALITY PATCH: Require ≥ 2 strong indicators ALIGNED with direction.
+    - Any strong indicator pointing wrong way alone vetoes.
+    - 1 aligned strong = 50% penalty.
+    - 0 aligned strong = reject.
+    Returns (passed: bool, adjusted_score: float).
+    """
+    direction = determine_direction(tf_scores)
+    if direction is None:
+        return False, 0.0
+
+    expected_sign = 1 if direction == "Long" else -1
+
+    strong_aligned = 0
+    strong_against = 0
+    for k, v in indicator_scores.items():
+        if abs(v) >= 0.8:
+            if (v > 0 and expected_sign > 0) or (v < 0 and expected_sign < 0):
+                strong_aligned += 1
+            else:
+                strong_against += 1
+
+    # Hard veto: more strong-against than aligned (or close to it)
+    if strong_against >= 1 and strong_aligned < strong_against + 1:
+        log(f"❌ {symbol}: Rejected — {strong_against} strong indicator(s) "
+            f"against {direction} ({strong_aligned} aligned)")
+        return False, 0.0
+
+    if strong_aligned == 0:
+        log(f"❌ {symbol}: Rejected — zero aligned strong indicators")
+        return False, 0.0
+
+    if strong_aligned == 1:
+        adj = round(original_score * 0.5, 2)
+        log(f"⚠️ {symbol}: Only 1 aligned strong indicator — 50% penalty "
+            f"(score {original_score:.2f} → {adj:.2f})")
+        return True, adj
+
+    return True, original_score
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN SCORING FUNCTION
+# ─────────────────────────────────────────────────────────────────────────────
 
 def score_symbol(symbol, candles_by_timeframe, market_context=None):
     """
@@ -525,12 +720,13 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
 
             # 2. Advanced Whale Detection
             whale_advanced = detect_whale_activity_advanced(candles, symbol)
-            if whale_advanced['detected']:
-                strength = whale_advanced['strength']
-                if whale_advanced['recommendation'] == 'potential_long':
+            if whale_advanced.get('detected'):
+                strength = whale_advanced.get('strength', 0)
+                rec = whale_advanced.get('recommendation', '')
+                if rec == 'potential_long':
                     score += WEIGHTS["whale_advanced"] * strength
                     indicator_scores[f"{tf_label}_whale_advanced"] = WEIGHTS["whale_advanced"] * strength
-                elif whale_advanced['recommendation'] == 'potential_short':
+                elif rec == 'potential_short':
                     score -= WEIGHTS["whale_advanced"] * strength
                     indicator_scores[f"{tf_label}_whale_advanced"] = -WEIGHTS["whale_advanced"] * strength
                 used_indicators.add("whale_advanced")
@@ -560,6 +756,13 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
                         indicator_scores[f"{tf_label}_macd_divergence"] = -WEIGHTS["macd_divergence"]
                     used_indicators.add("macd_divergence")
 
+                # MACD Momentum
+                macd_momentum = get_macd_momentum(candles)
+                if abs(macd_momentum) > 0.5:
+                    score += WEIGHTS["macd_momentum"] * macd_momentum
+                    indicator_scores[f"{tf_label}_macd_momentum"] = WEIGHTS["macd_momentum"] * macd_momentum
+                    used_indicators.add("macd_momentum")
+
                 if ema == "bullish":
                     score += WEIGHTS["ema"]
                     indicator_scores[f"{tf_label}_ema"] = WEIGHTS["ema"]
@@ -568,7 +771,7 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
                     indicator_scores[f"{tf_label}_ema"] = -WEIGHTS["ema"]
 
                 # Enhanced RSI Analysis
-                rsi_data = calculate_rsi_with_bands(candles, symbol=f"{symbol}_{tf_label}")
+                rsi_data = calculate_rsi_with_bands(candles)
                 if rsi_data:
                     rsi_signal, rsi_strength = get_balanced_rsi_signal(
                         rsi_data, market_trend=market_context.get("btc_trend", "neutral")
@@ -579,25 +782,40 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
                     elif rsi_signal == "sell":
                         score -= WEIGHTS["rsi"] * rsi_strength
                         indicator_scores[f"{tf_label}_rsi"] = -WEIGHTS["rsi"] * rsi_strength
-                    used_indicators.add("rsi")
 
-                # Volume spike — threshold lowered to 1.8x (was 2.5x)
+                    # RSI momentum
+                    if rsi_data.get('momentum'):
+                        momentum_score = WEIGHTS["rsi"] * 0.3 * (rsi_data['momentum'] / 10)
+                        score += momentum_score
+                        indicator_scores[f"{tf_label}_rsi_momentum"] = momentum_score
+                        used_indicators.add("rsi_momentum")
+
+                # Volume spike (1.8x)
                 if is_volume_spike(candles, VOLUME_SPIKE_THRESHOLD):
                     score += WEIGHTS["volume_spike"]
                     indicator_scores[f"{tf_label}_volume"] = WEIGHTS["volume_spike"]
-                    used_indicators.add("volume_spike")
 
-                # Stealth Accumulation
-                stealth_result = detect_stealth_accumulation_advanced(candles, symbol)
-                if stealth_result['detected']:
-                    stealth_score = WEIGHTS["stealth"] * stealth_result['strength']
-                    score += stealth_score
-                    indicator_scores[f"{tf_label}_stealth"] = stealth_score
-                    if stealth_result['patterns']:
-                        log(f"🕵️ Stealth patterns on {symbol}: {', '.join(stealth_result['patterns'])}")
-                    if stealth_result['recommendation'] == 'strong_accumulation':
-                        score += 0.5
-                        indicator_scores[f"{tf_label}_strong_stealth"] = 0.5
+                # Volume Climax
+                vol_climax_result = detect_volume_climax(candles)
+                vol_climax_detected = bool(vol_climax_result[0]) if isinstance(vol_climax_result, tuple) else bool(vol_climax_result)
+                if vol_climax_detected:
+                    score += WEIGHTS["volume_climax"]
+                    indicator_scores[f"{tf_label}_volume_climax"] = WEIGHTS["volume_climax"]
+                    used_indicators.add("volume_climax")
+
+                # Stealth accumulation
+                try:
+                    stealth_result = detect_stealth_accumulation_advanced(candles, symbol)
+                    if stealth_result.get('detected'):
+                        stealth_score = WEIGHTS["stealth"] * stealth_result.get('strength', 0)
+                        score += stealth_score
+                        indicator_scores[f"{tf_label}_stealth"] = stealth_score
+                        used_indicators.add("stealth")
+                        if stealth_result.get('recommendation') == 'strong_accumulation':
+                            score += WEIGHTS["strong_stealth"] * 0.5
+                            indicator_scores[f"{tf_label}_strong_stealth"] = WEIGHTS["strong_stealth"] * 0.5
+                except Exception:
+                    pass
 
                 if detect_volume_divergence(candles):
                     score += WEIGHTS["divergence"]
@@ -611,6 +829,11 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
                     score += WEIGHTS["whale"]
                     indicator_scores[f"{tf_label}_whale"] = WEIGHTS["whale"]
 
+                # Enhanced pattern detection
+                score, indicator_scores, used_indicators = enhanced_pattern_scoring(
+                    candles, tf_label, score, indicator_scores, used_indicators
+                )
+
                 type_scores["Scalp"] += score
                 tf_count["Scalp"] += 1
                 used_indicators.update(["macd", "ema", "volume", "divergence", "slow_breakout", "whale"])
@@ -621,7 +844,7 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
                 ema = detect_ema_crossover(candles)
                 trend = calculate_supertrend_signal(candles)
 
-                # Volume spike — threshold lowered to 1.8x
+                # Volume spike
                 if is_volume_spike(candles, VOLUME_SPIKE_THRESHOLD):
                     score += WEIGHTS["volume_spike"]
                     indicator_scores[f"{tf_label}_volume"] = WEIGHTS["volume_spike"]
@@ -644,7 +867,7 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
                         indicator_scores[f"{tf_label}_macd_divergence"] = -WEIGHTS["macd_divergence"]
                     used_indicators.add("macd_divergence")
 
-                # MACD Momentum (histogram direction — most predictive MACD signal)
+                # MACD Momentum
                 macd_momentum = get_macd_momentum(candles)
                 if abs(macd_momentum) > 0.5:
                     score += WEIGHTS["macd_momentum"] * macd_momentum
@@ -669,31 +892,12 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
                     indicator_scores[f"{tf_label}_ema_ribbon"] = -WEIGHTS["ema_ribbon"] * ribbon_analysis['strength']
                 used_indicators.add("ema_ribbon")
 
-                # EMA Squeeze
-                ema_squeeze = detect_ema_squeeze(ribbon)
-                if ema_squeeze['squeezing']:
-                    score += WEIGHTS["ema_squeeze"] * ema_squeeze['intensity']
-                    indicator_scores[f"{tf_label}_ema_squeeze"] = WEIGHTS["ema_squeeze"] * ema_squeeze['intensity']
-                    used_indicators.add("ema_squeeze")
-
                 if trend == "bullish":
                     score += WEIGHTS["supertrend"]
                     indicator_scores[f"{tf_label}_supertrend"] = WEIGHTS["supertrend"]
                 elif trend == "bearish":
                     score -= WEIGHTS["supertrend"]
                     indicator_scores[f"{tf_label}_supertrend"] = -WEIGHTS["supertrend"]
-
-                # Supertrend Squeeze
-                st_squeeze = detect_supertrend_squeeze(candles)
-                if st_squeeze['squeeze']:
-                    score += WEIGHTS["supertrend_squeeze"] * st_squeeze['intensity']
-                    indicator_scores[f"{tf_label}_supertrend_squeeze"] = WEIGHTS["supertrend_squeeze"] * st_squeeze['intensity']
-                    used_indicators.add("supertrend_squeeze")
-
-                # Enhanced Pattern Detection
-                score, indicator_scores, used_indicators = enhanced_pattern_scoring(
-                    candles, tf_label, score, indicator_scores, used_indicators
-                )
 
                 if detect_volume_divergence(candles):
                     score += WEIGHTS["divergence"]
@@ -707,6 +911,11 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
                     score += WEIGHTS["whale"]
                     indicator_scores[f"{tf_label}_whale"] = WEIGHTS["whale"]
 
+                # Enhanced pattern detection
+                score, indicator_scores, used_indicators = enhanced_pattern_scoring(
+                    candles, tf_label, score, indicator_scores, used_indicators
+                )
+
                 type_scores["Intraday"] += score
                 tf_count["Intraday"] += 1
                 used_indicators.update(["macd", "ema", "supertrend", "volume", "divergence", "slow_breakout", "whale"])
@@ -714,7 +923,7 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
             elif tf in TRADE_TYPE_TF["Swing"]:
                 # SWING INDICATORS (30m, 60m, 240m)
 
-                # Enhanced RSI Analysis
+                # RSI
                 rsi_data = calculate_rsi_with_bands(candles, symbol=f"{symbol}_{tf_label}")
                 if rsi_data:
                     rsi_signal, rsi_strength = get_balanced_rsi_signal(
@@ -737,7 +946,7 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
                             indicator_scores[f"{tf_label}_rsi_divergence"] = -WEIGHTS["rsi_divergence"]
                         used_indicators.add("rsi_divergence")
 
-                    # RSI Momentum
+                    # RSI momentum
                     if rsi_data.get('momentum'):
                         momentum_score = WEIGHTS["rsi"] * 0.3 * (rsi_data['momentum'] / 10)
                         score += momentum_score
@@ -798,10 +1007,10 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
                     score -= WEIGHTS["supertrend"]
                     indicator_scores[f"{tf_label}_supertrend"] = -WEIGHTS["supertrend"]
 
-                # Supertrend State Analysis
+                # Supertrend State
                 st_state = get_supertrend_state(candles)
-                if st_state['trend']:
-                    strength_bonus = WEIGHTS["supertrend"] * st_state['strength'] * 0.5
+                if st_state.get('trend'):
+                    strength_bonus = WEIGHTS["supertrend"] * st_state.get('strength', 0) * 0.5
                     if st_state['trend'] == 'up':
                         score += strength_bonus
                         indicator_scores[f"{tf_label}_supertrend_strength"] = strength_bonus
@@ -810,7 +1019,7 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
                         indicator_scores[f"{tf_label}_supertrend_strength"] = -strength_bonus
                     used_indicators.add("supertrend_strength")
 
-                # Bollinger Bands (price vs bands — NOT squeeze for longs)
+                # Bollinger
                 if bb and bb[-1]:
                     close = float(candles[-1]["close"])
                     if close < bb[-1]["lower"]:
@@ -819,25 +1028,21 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
                     elif close > bb[-1]["upper"]:
                         score -= WEIGHTS["bollinger"]
                         indicator_scores[f"{tf_label}_bollinger"] = -WEIGHTS["bollinger"]
-
-                    # NOTE: bollinger_squeeze weight is 0.0 (removed) — backscan shows
-                    # BB squeeze is anti-correlated with longs (-2.1% diff).
-                    # The if-block below will add 0.0 so it has no effect, but kept
-                    # for structural clarity if weight is ever re-evaluated.
+                    # bollinger_squeeze weight is 0 — kept for structural clarity
                     if bb[-1].get('squeeze'):
-                        score += WEIGHTS["bollinger_squeeze"]   # = 0.0
+                        score += WEIGHTS["bollinger_squeeze"]
                         indicator_scores[f"{tf_label}_bollinger_squeeze"] = WEIGHTS["bollinger_squeeze"]
                         used_indicators.add("bollinger_squeeze")
 
-                # Band Walk
+                # Band walk
                 band_walk = detect_band_walk(candles, bb)
                 if band_walk:
-                    if band_walk['walking_upper']:
-                        score += WEIGHTS["band_walk"] * band_walk['strength']
-                        indicator_scores[f"{tf_label}_band_walk"] = WEIGHTS["band_walk"] * band_walk['strength']
-                    elif band_walk['walking_lower']:
-                        score -= WEIGHTS["band_walk"] * band_walk['strength']
-                        indicator_scores[f"{tf_label}_band_walk"] = -WEIGHTS["band_walk"] * band_walk['strength']
+                    if band_walk.get('walking_upper'):
+                        score += WEIGHTS["band_walk"] * band_walk.get('strength', 0)
+                        indicator_scores[f"{tf_label}_band_walk"] = WEIGHTS["band_walk"] * band_walk.get('strength', 0)
+                    elif band_walk.get('walking_lower'):
+                        score -= WEIGHTS["band_walk"] * band_walk.get('strength', 0)
+                        indicator_scores[f"{tf_label}_band_walk"] = -WEIGHTS["band_walk"] * band_walk.get('strength', 0)
                     used_indicators.add("band_walk")
 
                 # Bollinger Signal
@@ -850,7 +1055,7 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
                     indicator_scores[f"{tf_label}_bollinger_signal"] = -WEIGHTS["bollinger"] * bb_signal['strength']
                 used_indicators.add("bollinger_signal")
 
-                # Enhanced Pattern Detection
+                # Enhanced pattern detection
                 score, indicator_scores, used_indicators = enhanced_pattern_scoring(
                     candles, tf_label, score, indicator_scores, used_indicators
                 )
@@ -866,27 +1071,26 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
         except Exception as e:
             log(f"❌ Scoring error for {symbol} [{tf}m]: {str(e)}", level="ERROR")
 
-        # Apply indicator rebalancing
+        # Apply rebalancing
         indicator_scores = rebalance_indicator_scores(indicator_scores, market_context)
         tf_scores[tf] = round(score, 2)
 
-    # ── Timeframe bonuses ────────────────────────────────────────────────────
+    # ── Apply timeframe bonuses ──────────────────────────────────────────────
     if type_scores["Scalp"] > 0 and tf_count["Scalp"] >= 2:
         type_scores["Scalp"] *= 1.2
-
     if type_scores["Intraday"] > 0 and tf_count["Intraday"] >= 2:
         type_scores["Intraday"] *= 1.15
 
-    # Find best trade type
+    # ── Find best trade type ─────────────────────────────────────────────────
     valid_types = [t for t in type_scores if tf_count[t] >= MIN_TF_REQUIRED[t]]
 
     if not valid_types:
         if '1' in candles_by_timeframe and '3' in candles_by_timeframe:
             best_type = "Scalp"
-            log(f"ℹ️ {symbol}: No valid trade types, defaulting to Scalp based on available TFs")
+            log(f"ℹ️ {symbol}: No valid trade types, defaulting to Scalp")
         elif '5' in candles_by_timeframe and '15' in candles_by_timeframe:
             best_type = "Intraday"
-            log(f"ℹ️ {symbol}: No valid trade types, defaulting to Intraday based on available TFs")
+            log(f"ℹ️ {symbol}: No valid trade types, defaulting to Intraday")
         else:
             best_type = "Intraday"
             log(f"ℹ️ {symbol}: No valid trade types, using Intraday as default")
@@ -897,7 +1101,7 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
 
     # Swing momentum check
     if best_type == "Swing":
-        has_swing_momentum, direction, strength = safe_detect_momentum_strength(
+        has_swing_momentum, _, strength = safe_detect_momentum_strength(
             candles_by_timeframe.get("60", [])
         )
         if not has_swing_momentum or strength < 0.3:
@@ -905,8 +1109,6 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
             best_score *= 0.8
 
     # ── MTF Bonuses ──────────────────────────────────────────────────────────
-
-    # Supertrend MTF Alignment
     if mtf_supertrend['alignment'] > 0.7:
         mtf_bonus = WEIGHTS["supertrend_mtf"] * mtf_supertrend['alignment']
         if mtf_supertrend['overall_trend'] == 'up':
@@ -917,7 +1119,6 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
             indicator_scores["mtf_supertrend"] = -mtf_bonus
         used_indicators.add("mtf_supertrend")
 
-    # RSI MTF Confluence
     if mtf_rsi.get('overall_signal') == 'bullish' and mtf_rsi.get('confluence_strength', 0) > 0.6:
         best_score += WEIGHTS["rsi_mtf"]
         indicator_scores["mtf_rsi"] = WEIGHTS["rsi_mtf"]
@@ -927,7 +1128,7 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
         indicator_scores["mtf_rsi"] = -WEIGHTS["rsi_mtf"]
         used_indicators.add("mtf_rsi")
 
-    # ── 4H Trend Gate (backscan: 4h is THE most predictive TF, +7-8% diff) ──
+    # ── 4H Trend Gate (additive bonus) ──────────────────────────────────────
     gate_adj, gate_reason = get_4h_trend_gate(candles_by_timeframe)
     if gate_adj != 0:
         best_score += gate_adj
@@ -945,10 +1146,14 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
     return round(best_score, 2), tf_scores, best_type, indicator_scores, list(used_indicators)
 
 
-def enhanced_score_symbol(symbol, candles_by_timeframe, market_context=None):
-    """Enhanced scoring with all the new validations"""
+# ─────────────────────────────────────────────────────────────────────────────
+# ENHANCED SCORE — adds quality gates on top of score_symbol
+# ─────────────────────────────────────────────────────────────────────────────
 
-    # First get the original score
+def enhanced_score_symbol(symbol, candles_by_timeframe, market_context=None):
+    """Enhanced scoring with all quality validations"""
+
+    # 1. Get base score
     original_score, tf_scores, trade_type, indicator_scores, used_indicators = score_symbol(
         symbol, candles_by_timeframe, market_context
     )
@@ -957,20 +1162,39 @@ def enhanced_score_symbol(symbol, candles_by_timeframe, market_context=None):
     if original_score < 5:
         return original_score, tf_scores, trade_type, indicator_scores, used_indicators
 
-    # Get current price and direction
+    # 2. Determine direction (now stricter)
+    direction = determine_direction(tf_scores)
+
+    # QUALITY GATE 1: No clean direction → reject
+    if direction is None:
+        log(f"⏭️ {symbol}: No clean direction (TFs disagree) — skipped")
+        return 0, tf_scores, trade_type, indicator_scores, list(used_indicators)
+
+    # QUALITY GATE 2: 4h direction veto
+    allow_4h, reason_4h = check_4h_alignment_veto(candles_by_timeframe, direction)
+    if not allow_4h:
+        log(f"❌ {symbol}: {reason_4h}")
+        return 0, tf_scores, trade_type, indicator_scores, list(used_indicators)
+
+    # QUALITY GATE 3: Anti-chase
+    allow_chase, reason_chase = check_not_chasing(candles_by_timeframe, direction, trade_type)
+    if not allow_chase:
+        log(f"❌ {symbol}: {reason_chase}")
+        return 0, tf_scores, trade_type, indicator_scores, list(used_indicators)
+
+    # 3. Get current price
     try:
         current_price = float(candles_by_timeframe['1'][-1]['close'])
     except (KeyError, IndexError):
+        current_price = 0
         for tf in ['5', '15', '30']:
             if tf in candles_by_timeframe and candles_by_timeframe[tf]:
                 current_price = float(candles_by_timeframe[tf][-1]['close'])
                 break
-        else:
+        if current_price == 0:
             return original_score, tf_scores, trade_type, indicator_scores, used_indicators
 
-    direction = determine_direction(tf_scores)
-
-    # 1. Validate entry timing
+    # 4. Validate entry timing
     entry_valid, entry_reason = entry_validator.validate_entry(
         symbol, candles_by_timeframe, direction, current_price, trade_type, original_score
     )
@@ -986,7 +1210,7 @@ def enhanced_score_symbol(symbol, candles_by_timeframe, market_context=None):
             used_indicators.append("entry_validation_failed")
         return original_score, tf_scores, trade_type, indicator_scores, used_indicators
 
-    # 2. Analyze pattern context
+    # 5. Pattern context
     pattern_context = None
     try:
         pattern_context = pattern_context_analyzer.analyze_pattern_context(
@@ -998,7 +1222,7 @@ def enhanced_score_symbol(symbol, candles_by_timeframe, market_context=None):
     except Exception as e:
         log(f"⚠️ Pattern context analysis failed: {e}", level="WARN")
 
-    # 3. Check for divergences
+    # 6. Divergences
     divergences_found = []
     try:
         divergences = divergence_detector.detect_all_divergences(candles_by_timeframe, direction)
@@ -1010,32 +1234,20 @@ def enhanced_score_symbol(symbol, candles_by_timeframe, market_context=None):
     except Exception as e:
         log(f"⚠️ Divergence detection failed: {e}", level="WARN")
 
-    # 4. Apply final score adjustments based on entry quality
+    # 7. Entry quality micro-bonuses
     entry_quality_score = 0
-
     try:
-        momentum_check = entry_validator.check_momentum_alignment(
-            candles_by_timeframe, direction, trade_type
-        )
-        if momentum_check[0]:
+        if entry_validator.check_momentum_alignment(candles_by_timeframe, direction, trade_type)[0]:
             entry_quality_score += 0.3
     except Exception:
         pass
-
     try:
-        tf_check = entry_validator.check_timeframe_alignment(
-            candles_by_timeframe, direction, trade_type
-        )
-        if tf_check[0]:
+        if entry_validator.check_timeframe_alignment(candles_by_timeframe, direction, trade_type)[0]:
             entry_quality_score += 0.3
     except Exception:
         pass
-
     try:
-        structure_check = entry_validator.check_market_structure(
-            candles_by_timeframe, trade_type
-        )
-        if structure_check[0]:
+        if entry_validator.check_market_structure(candles_by_timeframe, trade_type)[0]:
             entry_quality_score += 0.2
     except Exception:
         pass
@@ -1043,32 +1255,30 @@ def enhanced_score_symbol(symbol, candles_by_timeframe, market_context=None):
     original_score += entry_quality_score
     indicator_scores["entry_quality"] = entry_quality_score
 
-    # ── Strong indicator count check (soft penalty instead of hard rejection) ──
-    # Previously: hard reject if strong_count < 2
-    # Now: soft 30% penalty for 1 strong indicator, hard reject only if 0
-    # Reason: MACD cross fires 3.4%, vol spike 10% — hard to get 2 strong indicators
-    strong_count = sum(1 for k, v in indicator_scores.items() if abs(v) >= 0.8)
-    if strong_count == 0:
-        log(f"⚠️ {symbol}: Rejected — zero strong indicators")
+    # QUALITY GATE 4: Strong-indicator gate (tightened — must have ≥ 2 aligned)
+    passed, original_score = _apply_strong_indicator_gate(
+        symbol, original_score, indicator_scores, tf_scores
+    )
+    if not passed:
         return 0, tf_scores, trade_type, indicator_scores, list(used_indicators)
-    elif strong_count == 1:
-        log(f"⚠️ {symbol}: Only 1 strong indicator — applying 30% penalty (score {original_score:.2f} → {original_score * 0.7:.2f})")
-        original_score = round(original_score * 0.7, 2)
-    # 2+ strong indicators: no change
 
-    # Log enhanced analysis
+    # Log analysis
     log(f"📊 Enhanced scoring for {symbol}:")
-    log(f"   Original score: {original_score:.2f}")
+    log(f"   Final score: {original_score:.2f} | Direction: {direction}")
     log(f"   Entry validation: {entry_reason}")
     if pattern_context:
-        log(f"   Pattern context: {pattern_context.get('location', 'N/A')} - {pattern_context.get('trend_before', 'N/A')}")
+        log(f"   Pattern context: {pattern_context.get('location', 'N/A')} - "
+            f"{pattern_context.get('trend_before', 'N/A')}")
     if divergences_found:
         log(f"   Divergences: {[d['type'] + ' ' + d['indicator'] for d in divergences_found]}")
 
     return original_score, tf_scores, trade_type, indicator_scores, list(used_indicators)
 
 
-# Export all functions
+# ─────────────────────────────────────────────────────────────────────────────
+# Exports
+# ─────────────────────────────────────────────────────────────────────────────
+
 __all__ = [
     'score_symbol',
     'enhanced_score_symbol',
@@ -1083,6 +1293,8 @@ __all__ = [
     'check_volume_quality',
     'calculate_volume_penalty',
     'get_4h_trend_gate',
+    'check_4h_alignment_veto',
+    'check_not_chasing',
     'WEIGHTS',
     'TRADE_TYPE_TF',
     'MIN_TF_REQUIRED',

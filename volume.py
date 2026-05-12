@@ -50,7 +50,7 @@ def get_volumes_array(candles: List[Dict]) -> np.ndarray:
         log(f"Error converting volumes to array: {e}", level="ERROR")
         return np.array([])
 
-def is_volume_spike(candles: List[Dict], multiplier: float = 2.0, 
+def is_volume_spike(candles: List[Dict], multiplier: float = 2.5, 
                    use_median: bool = False, lookback: int = 10) -> bool:
     """
     Enhanced volume spike detection with multiple methods
@@ -85,7 +85,8 @@ def is_volume_spike(candles: List[Dict], multiplier: float = 2.0,
         if avg_volume <= 0:
             return False
             
-        return current_volume > avg_volume * multiplier
+        spike_detected = current_volume > avg_volume * multiplier
+        return bool(spike_detected)
         
     except Exception as e:
         asyncio.create_task(send_error_to_telegram(

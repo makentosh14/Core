@@ -1145,8 +1145,10 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
         log(f"📊 4H gate for {symbol}: {gate_adj:+.2f} ({gate_reason})")
 
     # Momentum bonus
-        if has_momentum and best_score > 6.0 and momentum_direction and direction == "Long":
-        expected_direction = "bullish" if determine_direction(tf_scores) == "Long" else "bearish"
+        if has_momentum and best_score > 6.0 and momentum_direction:
+            direction = determine_direction(tf_scores)
+            expected_direction = "bullish" if direction == "Long" else "bearish"
+        
         if momentum_direction == expected_direction:
             bonus = 0.8
             best_score += bonus

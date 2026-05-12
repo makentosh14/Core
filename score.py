@@ -117,7 +117,7 @@ MIN_TF_REQUIRED = {
 MAX_PATTERN_CONTRIBUTION = 2.0
 
 # Volume spike threshold — backscan: avg vol_ratio at pump = 2.09x
-VOLUME_SPIKE_THRESHOLD = 2.0
+VOLUME_SPIKE_THRESHOLD = 2.5
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -798,7 +798,7 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
                         used_indicators.add("rsi_momentum")
 
                 # Volume spike (1.8x)
-                if is_volume_spike(candles, VOLUME_SPIKE_THRESHOLD) and float(candles[-1].get('volume', 0)) > 0:
+                if bool(is_volume_spike(candles, VOLUME_SPIKE_THRESHOLD)):  # force python bool
                     score += WEIGHTS["volume_spike"]
                     indicator_scores[f"{tf_label}_volume"] = WEIGHTS["volume_spike"]
 
@@ -852,7 +852,7 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
                 trend = calculate_supertrend_signal(candles)
 
                 # Volume spike
-                if is_volume_spike(candles, VOLUME_SPIKE_THRESHOLD) and float(candles[-1].get('volume', 0)) > 0:
+                if bool(is_volume_spike(candles, VOLUME_SPIKE_THRESHOLD)):  # force python bool
                     score += WEIGHTS["volume_spike"]
                     indicator_scores[f"{tf_label}_volume"] = WEIGHTS["volume_spike"]
 

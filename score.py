@@ -117,7 +117,7 @@ MIN_TF_REQUIRED = {
 MAX_PATTERN_CONTRIBUTION = 2.0
 
 # Volume spike threshold — backscan: avg vol_ratio at pump = 2.09x
-VOLUME_SPIKE_THRESHOLD = 1.8
+VOLUME_SPIKE_THRESHOLD = 2.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -279,7 +279,11 @@ def check_4h_alignment_veto(candles_by_timeframe, direction):
             return False, f"4h_bearish_veto({bearish_signals_4h}/3)"
         if direction == "Short" and bullish_signals_4h >= 2:
             return False, f"4h_bullish_veto({bullish_signals_4h}/3)"
-
+        
+        # NEW: Explicit uptrend veto for Short
+        if direction == "Short" and bullish_signals_4h >= 1:
+            return False, f"4h_uptrend_veto_short({bullish_signals_4h})"
+        
         return True, "4h_aligned"
     except Exception as e:
         log(f"⚠️ 4h veto check failed: {e}", level="WARN")
@@ -773,9 +777,12 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
                 # Enhanced RSI Analysis
                 rsi_data = calculate_rsi_with_bands(candles)
                 if rsi_data:
-                    rsi_signal, rsi_strength = get_balanced_rsi_signal(
-                        rsi_data, market_trend=market_context.get("btc_trend", "neutral")
-                    )
+                    market_trend = market_context.get("btc_trend", "neutral")
+                    rsi_signal, rsi_strength = get_balanced_rsi_signal(rsi_data, market_trend)
+                    
+                    # Extra veto if strong opposite 4h
+                    if market_trend == "downtrend" and rsi_signal == "buy":
+                        rsi_strength *= 0.4
                     if rsi_signal == "buy":
                         score += WEIGHTS["rsi"] * rsi_strength
                         indicator_scores[f"{tf_label}_rsi"] = WEIGHTS["rsi"] * rsi_strength
@@ -791,7 +798,7 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
                         used_indicators.add("rsi_momentum")
 
                 # Volume spike (1.8x)
-                if is_volume_spike(candles, VOLUME_SPIKE_THRESHOLD):
+                if is_volume_spike(candles, VOLUME_SPIKE_THRESHOLD) and float(candles[-1].get('volume', 0)) > 0:
                     score += WEIGHTS["volume_spike"]
                     indicator_scores[f"{tf_label}_volume"] = WEIGHTS["volume_spike"]
 
@@ -845,7 +852,7 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
                 trend = calculate_supertrend_signal(candles)
 
                 # Volume spike
-                if is_volume_spike(candles, VOLUME_SPIKE_THRESHOLD):
+                if is_volume_spike(candles, VOLUME_SPIKE_THRESHOLD) and float(candles[-1].get('volume', 0)) > 0:
                     score += WEIGHTS["volume_spike"]
                     indicator_scores[f"{tf_label}_volume"] = WEIGHTS["volume_spike"]
 
@@ -1136,7 +1143,7 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
         log(f"📊 4H gate for {symbol}: {gate_adj:+.2f} ({gate_reason})")
 
     # Momentum bonus
-    if has_momentum and best_score > 6.0 and momentum_direction:
+        if has_momentum and best_score > 6.0 and momentum_direction and direction == "Long":
         expected_direction = "bullish" if determine_direction(tf_scores) == "Long" else "bearish"
         if momentum_direction == expected_direction:
             bonus = 0.8
@@ -1164,6 +1171,12 @@ def enhanced_score_symbol(symbol, candles_by_timeframe, market_context=None):
 
     # 2. Determine direction (now stricter)
     direction = determine_direction(tf_scores)
+
+        # CRITICAL FIX: Strong downtrend veto
+    gate_adj, gate_reason = get_4h_trend_gate(candles_by_timeframe)
+    if direction == "Long" and "4h_mom_neg" in gate_reason and gate_adj < -0.5:
+        log(f"❌ {symbol}: Strong 4h downtrend → forcing Short/0 (was Long)")
+        return -5.0, tf_scores, trade_type, indicator_scores, list(used_indicators)
 
     # QUALITY GATE 1: No clean direction → reject
     if direction is None:

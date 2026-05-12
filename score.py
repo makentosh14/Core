@@ -798,7 +798,8 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
                         used_indicators.add("rsi_momentum")
 
                 # Volume spike (1.8x)
-                if bool(is_volume_spike(candles, VOLUME_SPIKE_THRESHOLD)):  # force python bool
+                volume_spike = bool(is_volume_spike(candles, VOLUME_SPIKE_THRESHOLD))
+                if volume_spike:
                     score += WEIGHTS["volume_spike"]
                     indicator_scores[f"{tf_label}_volume"] = WEIGHTS["volume_spike"]
 
@@ -852,7 +853,8 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
                 trend = calculate_supertrend_signal(candles)
 
                 # Volume spike
-                if bool(is_volume_spike(candles, VOLUME_SPIKE_THRESHOLD)):  # force python bool
+                volume_spike = bool(is_volume_spike(candles, VOLUME_SPIKE_THRESHOLD))
+                if volume_spike:
                     score += WEIGHTS["volume_spike"]
                     indicator_scores[f"{tf_label}_volume"] = WEIGHTS["volume_spike"]
 

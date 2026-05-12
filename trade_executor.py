@@ -107,6 +107,16 @@ async def execute_trade_if_valid(signal_data, max_risk=0.06):
             log(f"❌ No direction provided for {symbol}", level="ERROR")
             return None
 
+        # Normalize direction
+        if isinstance(direction, str):
+            direction = direction.strip().lower()
+            if direction not in ["long", "short"]:
+                log(f"❌ Invalid direction '{direction}' for {symbol}", level="ERROR")
+                return None
+        else:
+            log(f"❌ Direction is not string: {type(direction)}", level="ERROR")
+            return None
+
         # Add debug logging
         log(f"🔍 DIRECTION DEBUG for {symbol}: '{direction}' (type: {type(direction)})")
 

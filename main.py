@@ -25,7 +25,7 @@ from typing import Dict, Any, Optional, List
 from scanner import fetch_symbols
 from websocket_candles import live_candles, stream_candles, SUPPORTED_INTERVALS
 from score import (
-    score_symbol, determine_direction, calculate_confidence,
+    score_symbol, enhanced_score_symbol, determine_direction, calculate_confidence,
     has_pump_potential, detect_momentum_strength
 )
 from telegram_bot import send_telegram_message, format_trade_signal, send_error_to_telegram
@@ -798,9 +798,21 @@ async def core_strategy_scan(symbols: List[str], trend_context: Dict):
 
                     # === CORE STRATEGY SIGNAL GENERATION ===
 
-                    # 1. Get full scoring data ONCE
-                    score_result = score_symbol(symbol, core_candles, trend_context)
+                    # 1. Get full scoring data — using ENHANCED scoring which applies
+                    #    all May 2026 quality gates: 4h alignment veto, anti-chase,
+                    #    strong-indicator gate, entry validation. A gate failure
+                    #    returns score=0 (or -5.0 for strong-downtrend Long veto),
+                    #    which then fails the tier checks below.
+                    score_result = await asyncio.to_thread(
+                        enhanced_score_symbol, symbol, core_candles, trend_context
+                    )
                     score, tf_scores, trade_type, indicator_scores, used_indicators = score_result
+
+                    # Quality gate hard rejection — enhanced_score returns 0 when a gate vetoes
+                    if score <= 0:
+                        log(f"⏭️ {symbol}: Rejected by quality gates (score={score})", level="DEBUG")
+                        trade_lock_manager.release_trade_lock(symbol, False)
+                        continue
 
                     # 2. Calculate core score (base + small bonus)
                     core_score = score + _calculate_momentum_and_regime_bonus(symbol, core_candles, trend_context)

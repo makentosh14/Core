@@ -955,6 +955,104 @@ async def scenario_pagination_assembles_history(main, mock: BybitMock) -> None:
     print(f"  [PASS] pagination: {len(result)} contiguous bars across {call_count['n']} requests")
 
 
+async def scenario_engine_skips_empty_anchor(main, mock: BybitMock) -> None:
+    """Bug A regression test: when the FIRST symbol's primary TF is empty
+    (e.g. cached as [] from a failed fetch), the engine must still run on
+    the remaining symbols rather than bailing immediately."""
+    print("\n---- SCENARIO 14: engine handles missing primary TF for first sym ---")
+    from backtest_engine import BacktestConfig, BacktestEngine
+
+    def trivial_scorer(symbol, candles_by_tf, trend_context):
+        bars = candles_by_tf.get("5", [])
+        if len(bars) < 11:
+            return (0.0, {"5": 0.0}, "Intraday", {}, [])
+        closes = [float(c["close"]) for c in bars[-10:]]
+        cur = float(bars[-1]["close"])
+        if cur >= max(closes):
+            return (15.0, {"5": 3.0, "1": 3.0}, "Intraday",
+                    {"breakout": 1.0}, ["breakout"])
+        return (0.0, {"5": 0.0}, "Intraday", {}, [])
+
+    # Build an uptrend candle set, then make the first symbol's 5m an empty
+    # list (simulating the bug scenario).
+    import random
+    random.seed(123)
+    base = 50.0
+    bars = []
+    price = base
+    for i in range(150):
+        price *= 1.004 + random.uniform(-0.001, 0.001)
+        bars.append({
+            "timestamp": 1_700_000_000_000 + i * 60_000,
+            "open": price * 0.999, "high": price * 1.004,
+            "low": price * 0.997, "close": price, "volume": 1000.0 + i,
+        })
+
+    # BTCUSDT is first but has NO 5m data — simulating Bug A.
+    # ETHUSDT has the full set.
+    data = {
+        "BTCUSDT": {"1": [], "5": [], "15": bars, "60": bars},
+        "ETHUSDT": {"1": bars, "5": bars, "15": bars, "60": bars},
+    }
+
+    cfg = BacktestConfig(
+        starting_balance=1000.0, risk_per_trade_pct=2.0,
+        taker_fee_pct=0.055, slippage_bps=5.0,
+        min_scalp_score=8.0, min_intraday_score=8.0, min_swing_score=8.0,
+        warmup_bars=25,
+    )
+    engine = BacktestEngine(cfg, score_fn=trivial_scorer)
+    m = engine.run(data, primary_tf="5", btc_symbol="BTCUSDT")
+
+    # Before the fix this returned total=0 because BTCUSDT was the anchor.
+    # After the fix, ETHUSDT's data drives the timeline.
+    assert_(m["total"] > 0,
+            f"engine must process other symbols when first symbol has empty primary TF; "
+            f"got {m['total']} trades")
+    print(f"  [PASS] processed {m['total']} trade(s) on ETHUSDT despite empty BTCUSDT 5m")
+
+
+async def scenario_no_cache_empty_results(main, mock: BybitMock) -> None:
+    """Bug B regression: load_or_fetch_history must NOT write a cache file
+    when the fetch returned an empty list. Otherwise subsequent runs read
+    the empty cache and skip the fetch forever."""
+    print("\n---- SCENARIO 15: empty fetch results aren't cached --------")
+    import bybit_api
+    from backtest_engine import load_or_fetch_history, CACHE_DIR
+    from pathlib import Path
+
+    # Pick a name that won't collide with real caches.
+    test_symbol = "EMPTYCACHETESTUSDT"
+    test_interval = "1"
+    test_limit = 500
+
+    # Pre-clean any stale cache.
+    cache_file = Path(CACHE_DIR) / f"{test_symbol}_linear_{test_interval}_{test_limit}.json"
+    if cache_file.exists():
+        cache_file.unlink()
+
+    # Mock signed_request to always return retCode=0 with empty list.
+    async def empty_signed_request(method, endpoint, params=None):
+        if endpoint == "/v5/market/kline":
+            return {"retCode": 0, "result": {"list": []}}
+        return {"retCode": 0, "result": {}}
+
+    original = bybit_api.signed_request
+    bybit_api.signed_request = empty_signed_request
+    try:
+        result = await load_or_fetch_history(
+            symbol=test_symbol, interval=test_interval,
+            limit=test_limit, use_cache=False,
+        )
+    finally:
+        bybit_api.signed_request = original
+
+    assert_(result == [], f"expected empty result; got {len(result)} bars")
+    assert_(not cache_file.exists(),
+            f"empty fetch should NOT have written cache file {cache_file}")
+    print(f"  [PASS] empty fetch result not persisted to cache")
+
+
 async def scenario_backtest_uptrend_profits(main, mock: BybitMock) -> None:
     """Phase 5 sanity check: a monotonic uptrend with realistic costs and
     a trivial breakout scorer must produce positive expectancy and
@@ -1050,6 +1148,8 @@ async def run_all() -> int:
         ("backtest_fees_and_slippage",   scenario_backtest_fees_and_slippage),
         ("backtest_uptrend_profits",     scenario_backtest_uptrend_profits),
         ("pagination_assembles_history", scenario_pagination_assembles_history),
+        ("engine_skips_empty_anchor",    scenario_engine_skips_empty_anchor),
+        ("no_cache_empty_results",       scenario_no_cache_empty_results),
     ]
 
     results = []

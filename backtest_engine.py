@@ -526,37 +526,72 @@ class BacktestEngine:
         if not symbols:
             return compute_metrics([], self.config.starting_balance, [self.config.starting_balance])
 
-        # Use the first symbol's primary TF as the master timeline.
-        # All symbols should be aligned in time; bars at the same timestamp
-        # are processed together.
-        sample = candles_by_symbol_tf[symbols[0]].get(primary_tf, [])
-        if not sample:
+        # Bug fix: previously this anchored the timeline on symbols[0]'s
+        # primary TF. If that one symbol had a failed fetch (empty list),
+        # the engine returned 0 trades immediately even though the OTHER
+        # symbols had full data. Now we build the timeline from the UNION
+        # of all symbols' primary-TF timestamps.
+        all_timestamps = set()
+        symbols_with_primary = []
+        for sym in symbols:
+            primary_bars = candles_by_symbol_tf[sym].get(primary_tf, [])
+            if primary_bars:
+                symbols_with_primary.append(sym)
+                for c in primary_bars:
+                    all_timestamps.add(int(c["timestamp"]))
+
+        if not all_timestamps:
+            print(
+                f"[WARN] backtest: no {primary_tf}m bars across any of {len(symbols)} symbols — "
+                f"likely empty/failed fetches. Try --no-cache and re-run."
+            )
             return compute_metrics([], self.config.starting_balance, [self.config.starting_balance])
 
-        n_bars = len(sample)
+        if len(symbols_with_primary) < len(symbols):
+            missing = [s for s in symbols if s not in symbols_with_primary]
+            print(f"[WARN] backtest: {len(missing)} symbol(s) missing {primary_tf}m data: {missing}. "
+                  f"Skipping them.")
+
+        sorted_timestamps = sorted(all_timestamps)
+        n_bars = len(sorted_timestamps)
         warmup = self.config.warmup_bars
+        if n_bars <= warmup:
+            print(f"[WARN] backtest: only {n_bars} bars on primary timeline, less than "
+                  f"warmup {warmup}. Nothing to do.")
+            return compute_metrics([], self.config.starting_balance, [self.config.starting_balance])
+
+        # Pre-index each symbol's primary TF for O(1) per-bar lookup.
+        primary_index: Dict[str, Dict[int, dict]] = {}
+        for sym in symbols_with_primary:
+            primary_index[sym] = {
+                int(c["timestamp"]): c for c in candles_by_symbol_tf[sym][primary_tf]
+            }
 
         for bar_idx in range(warmup, n_bars):
-            current_time_ms = int(sample[bar_idx]["timestamp"])
+            current_time_ms = sorted_timestamps[bar_idx]
 
             btc_view = self._build_view(
                 candles_by_symbol_tf.get(btc_symbol, {}), current_time_ms, primary_tf
             )
             trend_context = self._build_trend_context(btc_view)
 
-            for symbol in symbols:
+            for symbol in symbols_with_primary:
                 by_tf = candles_by_symbol_tf[symbol]
+                candle = primary_index[symbol].get(current_time_ms)
 
                 # 1. Step open position (if any) on the current bar.
                 if symbol in self.exchange.positions:
-                    candle = self._candle_at(by_tf.get(primary_tf, []), current_time_ms)
                     if candle:
                         self.exchange.step(symbol, candle, bar_idx, current_time_ms)
                     continue
 
-                # 2. No position — try to open one based on scoring.
+                # 2. No position, and this symbol has no bar at this timestamp:
+                #    nothing to do.
+                if not candle:
+                    continue
+
+                # 3. Try to open based on scoring.
                 view = self._build_view(by_tf, current_time_ms, primary_tf)
-                # Need at least primary and one other TF for the scorer.
                 if not view or len(view) < 2:
                     continue
 
@@ -590,10 +625,7 @@ class BacktestEngine:
                     direction = "long"
 
                 # Entry at the close of the current primary-TF bar.
-                primary_candles = view.get(primary_tf, [])
-                if not primary_candles:
-                    continue
-                entry_mark = float(primary_candles[-1]["close"])
+                entry_mark = float(candle["close"])
 
                 pos = self.exchange.open(
                     symbol, direction, trade_type, entry_mark, bar_idx, current_time_ms
@@ -647,6 +679,8 @@ async def fetch_history_paginated(
     total_bars: int,
     category: str = "linear",
     rate_limit_sleep: float = 0.15,
+    max_rate_limit_retries: int = 5,
+    progress_every: int = 5,
 ) -> List[dict]:
     """Fetch `total_bars` candles by walking backwards from the most recent
     bar using Bybit's `end` parameter. Bybit V5 caps a single request at
@@ -654,11 +688,15 @@ async def fetch_history_paginated(
     returning history.
 
     Returned candles are oldest-first, deduplicated by timestamp.
+
+    Retries on Bybit rate-limit errors with exponential backoff. Prints a
+    progress line every `progress_every` pages so long fetches are visible.
     """
     from bybit_api import signed_request
 
     all_candles: List[dict] = []
     end_ms: Optional[int] = None  # first request: no end → most recent bars
+    page = 0
 
     while len(all_candles) < total_bars:
         batch_size = min(200, total_bars - len(all_candles))
@@ -671,10 +709,32 @@ async def fetch_history_paginated(
         if end_ms is not None:
             params["end"] = str(end_ms)
 
-        resp = await signed_request("GET", "/v5/market/kline", params)
-        if resp.get("retCode") != 0:
+        # Retry loop for transient errors (rate limits, network).
+        resp = None
+        for attempt in range(max_rate_limit_retries):
+            resp = await signed_request("GET", "/v5/market/kline", params)
+            ret_code = resp.get("retCode")
+            if ret_code == 0:
+                break
+            # Bybit V5 rate-limit codes (best-effort list): 10006 = rate limit;
+            # 10002 = invalid request timestamp (sometimes from rapid bursts);
+            # 10018 = ip too many requests.
+            if ret_code in (10002, 10006, 10018):
+                backoff = (2 ** attempt) * 1.0  # 1, 2, 4, 8, 16 s
+                print(f"  [retry]{symbol} {interval}m: rate-limited "
+                      f"(retCode={ret_code}); backing off {backoff:.0f}s")
+                await asyncio.sleep(backoff)
+                continue
+            # Other non-zero code: surface as hard error.
             raise RuntimeError(
-                f"Bybit kline error for {symbol} ({interval}m): {resp.get('retMsg')}"
+                f"Bybit kline error for {symbol} ({interval}m): "
+                f"retCode={ret_code} retMsg={resp.get('retMsg')}"
+            )
+        else:
+            # All retries exhausted on rate limit.
+            raise RuntimeError(
+                f"Bybit kline rate-limit exhausted for {symbol} ({interval}m) "
+                f"after {max_rate_limit_retries} retries"
             )
 
         raw = resp.get("result", {}).get("list", []) or []
@@ -682,7 +742,6 @@ async def fetch_history_paginated(
             # Server has no more history at this end_ms — stop.
             break
 
-        # raw is newest-first; reverse so we get oldest-first per batch.
         batch = [
             {
                 "timestamp": int(c[0]),
@@ -694,23 +753,22 @@ async def fetch_history_paginated(
             }
             for c in reversed(raw)
         ]
-        # This batch is older than what we have; prepend.
         all_candles = batch + all_candles
 
-        # Next iteration: walk one ms before the oldest bar we just got.
         oldest_ts = int(raw[-1][0])
         new_end = oldest_ts - 1
         if end_ms is not None and new_end >= end_ms:
-            # No progress made (server returned same data); avoid infinite loop.
             break
         end_ms = new_end
 
-        # Rate-limit politely.
+        page += 1
+        if page % progress_every == 0:
+            print(f"  [fetch]{symbol} {interval}m: {len(all_candles)}/{total_bars} bars "
+                  f"({page} pages)")
+
         await asyncio.sleep(rate_limit_sleep)
 
-    # Final dedup by timestamp + sort ascending (defensive — Bybit shouldn't
-    # send dupes across the boundary, but the `end=oldest-1` overlap math
-    # has edge cases).
+    # Final dedup + sort ascending.
     seen = set()
     out: List[dict] = []
     for c in sorted(all_candles, key=lambda x: x["timestamp"]):
@@ -728,19 +786,32 @@ async def load_or_fetch_history(
     limit: int = 200,
     category: str = "linear",
     use_cache: bool = True,
+    min_cache_bars_threshold: float = 0.5,
 ) -> List[dict]:
     """Load historical candles. Tries disk cache first, falls back to REST.
     When `limit > 200`, uses pagination to walk back further than one
-    Bybit request can reach."""
+    Bybit request can reach.
+
+    Bug fix: previously cached EMPTY results. If a fetch failed (rate limit,
+    transient API issue), the empty list was written to disk and every
+    subsequent run saw 0 bars without re-fetching. Now we only write the
+    cache when we have at least `min_cache_bars_threshold * limit` bars.
+    """
     CACHE_DIR.mkdir(exist_ok=True)
     cache_file = CACHE_DIR / f"{symbol}_{category}_{interval}_{limit}.json"
 
     if use_cache and cache_file.exists():
         try:
             with open(cache_file, "r") as f:
-                return json.load(f)
+                cached = json.load(f)
+            # Defensive: invalidate cache if it's suspiciously thin.
+            if cached and len(cached) >= int(limit * min_cache_bars_threshold):
+                return cached
+            else:
+                print(f"  [WARN]{symbol} {interval}m: cache has {len(cached or [])} bars "
+                      f"(< {min_cache_bars_threshold*100:.0f}% of {limit}); re-fetching")
         except Exception:
-            pass  # fall through to REST
+            pass
 
     if limit <= 200:
         from websocket_candles import fetch_candles_rest
@@ -752,11 +823,17 @@ async def load_or_fetch_history(
             symbol, interval=interval, total_bars=limit, category=category
         )
 
-    try:
-        with open(cache_file, "w") as f:
-            json.dump(candles, f)
-    except Exception:
-        pass
+    # Only cache results with enough bars to be useful (Bug B fix).
+    if candles and len(candles) >= int(limit * min_cache_bars_threshold):
+        try:
+            with open(cache_file, "w") as f:
+                json.dump(candles, f)
+        except Exception:
+            pass
+    elif not candles:
+        print(f"  [WARN]{symbol} {interval}m: empty fetch result - NOT caching")
+    else:
+        print(f"  [WARN]{symbol} {interval}m: only {len(candles)}/{limit} bars fetched - NOT caching")
 
     return candles
 

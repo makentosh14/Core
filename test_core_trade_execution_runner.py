@@ -156,6 +156,10 @@ class BybitMock:
         if endpoint == "/v5/order/cancel":
             return {"retCode": 0, "result": {}}
 
+        # /v5/order/amend — used by unified_exit_manager._update_exchange_sl
+        if endpoint == "/v5/order/amend":
+            return {"retCode": 0, "result": {"orderId": params.get("orderId", "")}}
+
         # /v5/order/create — market, stop, or TP
         if endpoint == "/v5/order/create":
             kind = self._classify_order(params)
@@ -544,6 +548,166 @@ async def scenario_scalp_hunter_qty(main, mock: BybitMock) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PHASE 2 EXIT-PATH SCENARIOS
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def scenario_force_exit(main, mock: BybitMock) -> None:
+    """Phase 2 Fix #8: process_trade_exits(force_exit=True) must immediately
+    close the position regardless of PnL thresholds."""
+    print("\n---- SCENARIO 4: force_exit kwarg actually works (Fix #8) -")
+    from unified_exit_manager import process_trade_exits, exit_manager
+
+    symbol = "FORCEUSDT"
+    mock.calls.clear()
+    exit_manager.reset_symbol(symbol)
+
+    trade = {
+        "symbol": symbol,
+        "direction": "Long",
+        "entry_price": 100.0,
+        "qty": 10.0,
+        "trade_type": "Scalp",
+        "sl_order_id": "OLD_SL_ID",
+        "tp1_order_id": "OLD_TP_ID",
+        "exited": False,
+    }
+
+    # Current price barely above entry — pnl ~ +0.1%, well below any SL/TP trigger.
+    exited = await process_trade_exits(symbol, trade, 100.1, force_exit=True)
+    assert_(exited is True, "force_exit must return True (trade exited)")
+    assert_(trade.get("exited") is True, "trade['exited'] must be True after force_exit")
+    assert_(trade.get("exit_reason") == "force_exit", f"exit_reason wrong: {trade.get('exit_reason')}")
+    print(f"  [PASS] Force-exit closed trade with pnl=+0.10%")
+
+
+async def scenario_exit_cancels_residual_orders(main, mock: BybitMock) -> None:
+    """Phase 2 Fix #2: on trade exit, the SL and TP1 conditional orders
+    must be cancelled before/alongside the market close so stale orders
+    don't accumulate on the exchange."""
+    print("\n---- SCENARIO 5: exit cancels residual SL + TP1 orders ----")
+    from unified_exit_manager import process_trade_exits, exit_manager
+
+    symbol = "CANCELUSDT"
+    mock.calls.clear()
+    exit_manager.reset_symbol(symbol)
+
+    # Mock returns size=0 post-close so the verification loop succeeds.
+    mock.position_size = "0"
+
+    trade = {
+        "symbol": symbol,
+        "direction": "Long",
+        "entry_price": 100.0,
+        "qty": 10.0,
+        "trade_type": "Scalp",
+        "sl_order_id": "SL_TO_CANCEL",
+        "tp1_order_id": "TP_TO_CANCEL",
+        "exited": False,
+    }
+
+    await process_trade_exits(symbol, trade, 100.1, force_exit=True)
+
+    cancel_calls = mock.calls_to("/v5/order/cancel")
+    cancelled_ids = {c["params"].get("orderId") for c in cancel_calls}
+    assert_("SL_TO_CANCEL" in cancelled_ids,
+            f"SL order not cancelled on exit; cancelled={cancelled_ids}")
+    assert_("TP_TO_CANCEL" in cancelled_ids,
+            f"TP1 order not cancelled on exit; cancelled={cancelled_ids}")
+    print(f"  [PASS] Both SL_TO_CANCEL and TP_TO_CANCEL were cancelled on exit")
+
+    # Restore default for subsequent scenarios.
+    mock.position_size = "10.0"
+
+
+async def scenario_tp1_via_fill_detection(main, mock: BybitMock) -> None:
+    """Phase 2 Fix #1: TP1 must be detected from actual position size shrinkage
+    (exchange's conditional Market filled), NOT only from PnL %.
+
+    Setup: trade["original_qty"] = 10.0, mock /v5/position/list returns size 5.0
+    (TP1 just filled, position halved). Current price is BELOW the PnL trigger
+    but above 50% of it (the gate). Bot should detect TP1 via fill."""
+    print("\n---- SCENARIO 6: TP1 detected via position-size shrink (Fix #1)")
+    from unified_exit_manager import process_trade_exits, exit_manager
+
+    symbol = "TP1FILLUSDT"
+    exit_manager.reset_symbol(symbol)
+    mock.calls.clear()
+    mock.position_size = "5.0"        # exchange shows position halved
+
+    trade = {
+        "symbol": symbol,
+        "direction": "Long",
+        "entry_price": 100.0,
+        "qty": 10.0,
+        "original_qty": 10.0,
+        "trade_type": "Scalp",
+        "tp1_target": 101.2,           # TP1 trigger level
+        "tp1_order_id": "TP1_FILLED",
+        "sl_order_id": "SL_PRE_TP1",
+        "exited": False,
+    }
+
+    # Current price = 100.7 (pnl=+0.7%, below 1.2% trigger but above gate=0.6%)
+    exited = await process_trade_exits(symbol, trade, 100.7)
+    assert_(exited is False, "tp1 fill detection should NOT exit the trade")
+    assert_(trade.get("tp1_hit") is True, "tp1_hit flag must be set after fill detection")
+    assert_(trade.get("breakeven_sl") is not None, "breakeven SL must be computed")
+    # qty must be re-anchored to the actual remaining size
+    assert_(float(trade.get("qty", 0)) == 5.0,
+            f"trade['qty'] must be re-anchored to remaining size 5.0; got {trade.get('qty')}")
+
+    # SL update must have been ATTEMPTED — either via amend or replacement.
+    amend_calls = mock.calls_to("/v5/order/amend")
+    sl_calls = [c for c in mock.order_create_calls()
+                if c["params"].get("orderFilter") == "Stop"]
+    assert_(len(amend_calls) + len(sl_calls) >= 1,
+            "expected /v5/order/amend or new SL placement after TP1 detection")
+    print(f"  [PASS] TP1 detected via fill; qty re-anchored 10.0 -> 5.0; SL moved to breakeven")
+
+    mock.position_size = "10.0"
+
+
+async def scenario_sl_update_via_amend(main, mock: BybitMock) -> None:
+    """Phase 2 Fix #4: SL updates use /v5/order/amend (atomic), not
+    cancel-then-place. No naked-position window during trailing pumps."""
+    print("\n---- SCENARIO 7: SL update via /v5/order/amend (Fix #4) ----")
+    from unified_exit_manager import exit_manager
+
+    symbol = "AMENDUSDT"
+    exit_manager.reset_symbol(symbol)
+    mock.calls.clear()
+
+    trade = {
+        "symbol": symbol,
+        "direction": "Long",
+        "entry_price": 100.0,
+        "qty": 10.0,
+        "trade_type": "Scalp",
+        "sl_order_id": "EXISTING_SL",
+        "exited": False,
+    }
+
+    ok = await exit_manager._update_exchange_sl(symbol, trade, 100.5)
+    assert_(ok is True, "_update_exchange_sl should succeed when amend works")
+
+    amend_calls = mock.calls_to("/v5/order/amend")
+    assert_(len(amend_calls) >= 1,
+            f"expected /v5/order/amend call; got calls to: {[c['endpoint'] for c in mock.calls]}")
+    assert_(amend_calls[0]["params"].get("orderId") == "EXISTING_SL",
+            "amend must target the existing SL orderId")
+    assert_(float(amend_calls[0]["params"].get("triggerPrice")) == 100.5,
+            "amend must carry the new trigger price")
+
+    # CRUCIAL: no cancel call should fire when amend succeeds — that was the
+    # old naked-window bug. Verify no cancel happened on the SL order.
+    cancel_calls = mock.calls_to("/v5/order/cancel")
+    sl_cancels = [c for c in cancel_calls if c["params"].get("orderId") == "EXISTING_SL"]
+    assert_(len(sl_cancels) == 0,
+            "old cancel-then-place pattern must not be used when amend succeeds")
+    print(f"  [PASS] SL atomically amended via /v5/order/amend (no cancel-then-place)")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # RUNNER
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -563,9 +727,14 @@ async def run_all() -> int:
     stub_main_module(main, "TESTUSDT")
 
     scenarios = [
-        ("happy_path",                scenario_happy_path),
-        ("sl_failure_emergency_close", scenario_sl_failure_emergency_close),
-        ("scalp_hunter_qty",          scenario_scalp_hunter_qty),
+        ("happy_path",                  scenario_happy_path),
+        ("sl_failure_emergency_close",  scenario_sl_failure_emergency_close),
+        ("scalp_hunter_qty",            scenario_scalp_hunter_qty),
+        # Phase 2 exit-path scenarios
+        ("force_exit",                  scenario_force_exit),
+        ("exit_cancels_residual_orders", scenario_exit_cancels_residual_orders),
+        ("tp1_via_fill_detection",      scenario_tp1_via_fill_detection),
+        ("sl_update_via_amend",         scenario_sl_update_via_amend),
     ]
 
     results = []

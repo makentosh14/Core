@@ -822,6 +822,137 @@ async def scenario_supervisor_restart(main, mock: BybitMock) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PHASE 5 BACKTEST ENGINE SCENARIOS
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def scenario_backtest_fees_and_slippage(main, mock: BybitMock) -> None:
+    """Phase 5: fees + slippage must reduce returns vs a zero-cost baseline
+    on the same synthetic dataset. If they don't, the cost model is broken."""
+    print("\n---- SCENARIO 11: backtest fees+slippage drag (Phase 5) ----")
+    from backtest_engine import BacktestConfig, BacktestEngine
+
+    # Trivial trend-following scorer for deterministic results:
+    # always trigger an Intraday Long when the last close is above the 20-bar
+    # mean. Returns the 5-tuple shape the engine expects.
+    def trivial_scorer(symbol, candles_by_tf, trend_context):
+        bars = candles_by_tf.get("5") or candles_by_tf.get("1") or []
+        if len(bars) < 21:
+            return (0.0, {"5": 0.0}, "Intraday", {}, [])
+        closes = [float(c["close"]) for c in bars[-20:]]
+        cur = float(bars[-1]["close"])
+        mean = sum(closes) / len(closes)
+        if cur > mean * 1.001:
+            return (20.0, {"5": 3.0, "1": 3.0}, "Intraday",
+                    {"sig": 1.0}, ["sig"])
+        return (0.0, {"5": 0.0}, "Intraday", {}, [])
+
+    # Synthetic monotonic uptrend — 300 bars rising 0.5% per bar.
+    base = 100.0
+    candles = []
+    for i in range(300):
+        price = base * (1.0 + 0.005 * i)
+        candles.append({
+            "timestamp": 1_700_000_000_000 + i * 60_000,
+            "open":  price * 0.999,
+            "high":  price * 1.003,
+            "low":   price * 0.997,
+            "close": price,
+            "volume": 1000.0 + i,
+        })
+    data = {"BTCUSDT": {"1": candles, "5": candles, "15": candles, "60": candles}}
+
+    # Run A: zero costs.
+    cfg_free = BacktestConfig(
+        starting_balance=1000.0, risk_per_trade_pct=2.5,
+        taker_fee_pct=0.0, slippage_bps=0.0,
+        min_scalp_score=8.0, min_intraday_score=8.0, min_swing_score=8.0,
+        warmup_bars=25,
+    )
+    engine_free = BacktestEngine(cfg_free, score_fn=trivial_scorer)
+    m_free = engine_free.run(data, primary_tf="5", btc_symbol="BTCUSDT")
+
+    # Run B: realistic costs.
+    cfg_real = BacktestConfig(
+        starting_balance=1000.0, risk_per_trade_pct=2.5,
+        taker_fee_pct=0.055, slippage_bps=5.0,
+        min_scalp_score=8.0, min_intraday_score=8.0, min_swing_score=8.0,
+        warmup_bars=25,
+    )
+    engine_real = BacktestEngine(cfg_real, score_fn=trivial_scorer)
+    m_real = engine_real.run(data, primary_tf="5", btc_symbol="BTCUSDT")
+
+    assert_(m_free["total"] > 0, "expected at least one trade in zero-cost run")
+    assert_(m_real["total"] > 0, "expected at least one trade in realistic-cost run")
+    assert_(
+        m_free["expectancy_pct"] > m_real["expectancy_pct"],
+        f"fee/slippage drag missing: free={m_free['expectancy_pct']:.3f}% "
+        f"real={m_real['expectancy_pct']:.3f}%",
+    )
+    drag = m_free["expectancy_pct"] - m_real["expectancy_pct"]
+    print(f"  [PASS] free expectancy {m_free['expectancy_pct']:+.3f}% / "
+          f"real {m_real['expectancy_pct']:+.3f}% / drag {drag:.3f}% per trade")
+
+
+async def scenario_backtest_uptrend_profits(main, mock: BybitMock) -> None:
+    """Phase 5 sanity check: a monotonic uptrend with realistic costs and
+    a trivial breakout scorer must produce positive expectancy and
+    end with final balance > starting balance. If this fails, the engine
+    isn't capturing trends correctly."""
+    print("\n---- SCENARIO 12: backtest captures uptrend profit -------")
+    from backtest_engine import BacktestConfig, BacktestEngine
+
+    def trivial_scorer(symbol, candles_by_tf, trend_context):
+        bars = candles_by_tf.get("5", [])
+        if len(bars) < 11:
+            return (0.0, {"5": 0.0}, "Intraday", {}, [])
+        # Score Long when current close > 10-bar high (breakout).
+        closes = [float(c["close"]) for c in bars[-10:]]
+        cur = float(bars[-1]["close"])
+        if cur >= max(closes):
+            return (15.0, {"5": 3.0, "1": 3.0}, "Intraday",
+                    {"breakout": 1.0}, ["breakout"])
+        return (0.0, {"5": 0.0}, "Intraday", {}, [])
+
+    # Strong uptrend with mild noise — designed so SL gets touched rarely
+    # but TP1 (2%) gets hit on most trades.
+    import random
+    random.seed(42)
+    base = 100.0
+    candles = []
+    price = base
+    for i in range(300):
+        price *= 1.005 + random.uniform(-0.002, 0.002)
+        candles.append({
+            "timestamp": 1_700_000_000_000 + i * 60_000,
+            "open": price * (1 + random.uniform(-0.001, 0.001)),
+            "high": price * (1 + random.uniform(0.001, 0.005)),
+            "low":  price * (1 - random.uniform(0.001, 0.003)),
+            "close": price,
+            "volume": 1000.0 + i,
+        })
+    data = {"BTCUSDT": {"1": candles, "5": candles, "15": candles, "60": candles}}
+
+    cfg = BacktestConfig(
+        starting_balance=1000.0, risk_per_trade_pct=2.0,
+        taker_fee_pct=0.055, slippage_bps=5.0,
+        min_scalp_score=8.0, min_intraday_score=8.0, min_swing_score=8.0,
+        warmup_bars=25,
+    )
+    engine = BacktestEngine(cfg, score_fn=trivial_scorer)
+    m = engine.run(data, primary_tf="5", btc_symbol="BTCUSDT")
+
+    assert_(m["total"] > 0, "expected trades in clear uptrend")
+    assert_(m["expectancy_pct"] > 0,
+            f"expected positive expectancy in clean uptrend; got {m['expectancy_pct']:+.3f}%")
+    assert_(m["final_balance"] > m["starting_balance"],
+            f"final balance should exceed start; {m['final_balance']} vs {m['starting_balance']}")
+    assert_(m["win_rate"] > 0.5,
+            f"win rate should be > 50% in clean uptrend; got {m['win_rate'] * 100:.1f}%")
+    print(f"  [PASS] uptrend: {m['total']} trades, win_rate={m['win_rate'] * 100:.1f}%, "
+          f"expectancy={m['expectancy_pct']:+.3f}%, total={m['total_pnl_pct']:+.2f}%")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # RUNNER
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -853,6 +984,9 @@ async def run_all() -> int:
         ("candle_dedup",                scenario_candle_dedup),
         ("staleness_guard",             scenario_staleness_guard),
         ("supervisor_restart",          scenario_supervisor_restart),
+        # Phase 5 backtest engine scenarios
+        ("backtest_fees_and_slippage",  scenario_backtest_fees_and_slippage),
+        ("backtest_uptrend_profits",    scenario_backtest_uptrend_profits),
     ]
 
     results = []

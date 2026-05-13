@@ -803,9 +803,13 @@ async def core_strategy_scan(symbols: List[str], trend_context: Dict):
                     #    strong-indicator gate, entry validation. A gate failure
                     #    returns score=0 (or -5.0 for strong-downtrend Long veto),
                     #    which then fails the tier checks below.
-                    score_result = await asyncio.to_thread(
-                        enhanced_score_symbol, symbol, core_candles, trend_context
-                    )
+                    #
+                    # NOTE: enhanced_score_symbol is synchronous but its internals
+                    # (send_error_to_telegram in error paths, deeper event-loop refs)
+                    # are not thread-safe, so asyncio.to_thread breaks it.
+                    # Event-loop blocking during scoring is a known issue tracked
+                    # for a later refactor — for now, run in the main loop.
+                    score_result = enhanced_score_symbol(symbol, core_candles, trend_context)
                     score, tf_scores, trade_type, indicator_scores, used_indicators = score_result
 
                     # Quality gate hard rejection — enhanced_score returns 0 when a gate vetoes

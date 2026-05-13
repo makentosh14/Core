@@ -107,6 +107,15 @@ class BacktestConfig:
     # If False, accept the trade_type from scorer but assume "Long" (debug only).
     require_clean_direction: bool = True
 
+    # Phase 6 mitigation: per-symbol score adjustment. Should mirror
+    # main.py SYMBOL_SCORE_ADJUSTMENT. Negative values penalize symbols
+    # whose signals are dominated by survivorship-biased weights (majors).
+    # Set empty {} to disable.
+    symbol_score_adjustment: Dict[str, float] = field(default_factory=lambda: {
+        "BTCUSDT": -2.0,
+        "ETHUSDT": -2.0,
+    })
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data models
@@ -672,12 +681,16 @@ class BacktestEngine:
                 if score <= 0:
                     continue
 
+                # Apply Phase 6 per-symbol score adjustment (mirrors main.py).
+                adj = self.config.symbol_score_adjustment.get(symbol, 0.0)
+                adjusted_score = score + adj
+
                 gate = {
                     "Scalp": self.config.min_scalp_score,
                     "Intraday": self.config.min_intraday_score,
                     "Swing": self.config.min_swing_score,
                 }.get(trade_type, self.config.min_intraday_score)
-                if score < gate:
+                if adjusted_score < gate:
                     continue
 
                 if self.config.require_clean_direction:

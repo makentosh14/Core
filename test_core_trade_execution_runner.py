@@ -955,6 +955,125 @@ async def scenario_pagination_assembles_history(main, mock: BybitMock) -> None:
     print(f"  [PASS] pagination: {len(result)} contiguous bars across {call_count['n']} requests")
 
 
+async def scenario_metrics_breakdown_by_segment(main, mock: BybitMock) -> None:
+    """Per-trade-type, per-symbol, per-direction breakdowns must appear in
+    compute_metrics output and sum to the global totals."""
+    print("\n---- SCENARIO 16: metrics breakdown by segment ------------")
+    from backtest_engine import compute_metrics, SimTrade
+
+    trades = [
+        SimTrade(symbol="BTCUSDT", direction="long",  trade_type="Scalp",
+                 entry_time_ms=1, exit_time_ms=2, entry_price=100, exit_price=101.5,
+                 qty=1.0, fees_paid=0.1, pnl_pct=1.4, pnl_usd=14.0,
+                 exit_reason="trailing_stop", bars_held=5, tp1_hit=True),
+        SimTrade(symbol="BTCUSDT", direction="long",  trade_type="Scalp",
+                 entry_time_ms=3, exit_time_ms=4, entry_price=101, exit_price=100,
+                 qty=1.0, fees_paid=0.1, pnl_pct=-1.1, pnl_usd=-11.0,
+                 exit_reason="stop_loss", bars_held=3, tp1_hit=False),
+        SimTrade(symbol="ETHUSDT", direction="short", trade_type="Intraday",
+                 entry_time_ms=5, exit_time_ms=6, entry_price=2000, exit_price=1960,
+                 qty=0.5, fees_paid=2.0, pnl_pct=1.8, pnl_usd=18.0,
+                 exit_reason="trailing_stop", bars_held=12, tp1_hit=True),
+        SimTrade(symbol="ETHUSDT", direction="long",  trade_type="Intraday",
+                 entry_time_ms=7, exit_time_ms=8, entry_price=2010, exit_price=1985,
+                 qty=0.5, fees_paid=2.0, pnl_pct=-1.3, pnl_usd=-12.5,
+                 exit_reason="stop_loss", bars_held=8, tp1_hit=False),
+    ]
+    eq_curve = [1000.0, 1014.0, 1003.0, 1021.0, 1008.5]
+    m = compute_metrics(trades, starting_balance=1000.0, equity_curve=eq_curve)
+
+    assert_("by_trade_type" in m, "by_trade_type missing")
+    assert_("by_symbol" in m, "by_symbol missing")
+    assert_("by_direction" in m, "by_direction missing")
+
+    tt = m["by_trade_type"]
+    assert_("Scalp" in tt and "Intraday" in tt,
+            f"missing trade types; got keys: {list(tt.keys())}")
+    assert_(tt["Scalp"]["count"] == 2, f"Scalp count wrong: {tt['Scalp']['count']}")
+    assert_(tt["Intraday"]["count"] == 2, f"Intraday count wrong: {tt['Intraday']['count']}")
+
+    sym = m["by_symbol"]
+    assert_(sym["BTCUSDT"]["count"] == 2 and sym["ETHUSDT"]["count"] == 2,
+            f"symbol counts wrong: {sym}")
+
+    direc = m["by_direction"]
+    assert_(direc["long"]["count"] == 3 and direc["short"]["count"] == 1,
+            f"direction counts wrong: {direc}")
+
+    # Buckets must sum to global total.
+    total_from_buckets = sum(s["count"] for s in tt.values())
+    assert_(total_from_buckets == m["total"],
+            f"trade type sums {total_from_buckets} != global total {m['total']}")
+    print(f"  [PASS] segment breakdowns present and consistent")
+
+
+async def scenario_atr_sizing_differs_from_pct(main, mock: BybitMock) -> None:
+    """When use_atr_sl_tp=True, SL/TP percentages should be ATR-derived
+    (volatility-dependent) and thus differ from the fixed-pct mode on the
+    same dataset. Verify by running the same data through both modes."""
+    print("\n---- SCENARIO 17: ATR sizing differs from fixed pct -------")
+    from backtest_engine import BacktestConfig, BacktestEngine
+
+    def trivial_scorer(symbol, candles_by_tf, trend_context):
+        bars = candles_by_tf.get("5", [])
+        if len(bars) < 25:
+            return (0.0, {"5": 0.0}, "Intraday", {}, [])
+        # Always pick Intraday Long for a deterministic test.
+        return (15.0, {"5": 3.0, "1": 3.0}, "Intraday",
+                {"breakout": 1.0}, ["breakout"])
+
+    # Build candles with reasonable volatility (~1% ATR) so ATR multipliers
+    # produce SL/TP percentages roughly in the same ballpark as the fixed pct.
+    import random
+    random.seed(7)
+    base = 100.0
+    bars = []
+    price = base
+    for i in range(200):
+        # Walk price with mild drift and 1-2% intra-bar range.
+        price *= 1.001 + random.uniform(-0.002, 0.003)
+        bars.append({
+            "timestamp": 1_700_000_000_000 + i * 60_000,
+            "open":  price * (1 + random.uniform(-0.002, 0.002)),
+            "high":  price * (1 + random.uniform(0.003, 0.010)),
+            "low":   price * (1 - random.uniform(0.003, 0.010)),
+            "close": price,
+            "volume": 1000.0 + i,
+        })
+    data = {"BTCUSDT": {"1": bars, "5": bars, "15": bars, "60": bars}}
+
+    base_cfg_kwargs = dict(
+        starting_balance=1000.0, risk_per_trade_pct=2.0,
+        taker_fee_pct=0.055, slippage_bps=5.0,
+        min_scalp_score=8.0, min_intraday_score=8.0, min_swing_score=8.0,
+        warmup_bars=30,
+    )
+
+    cfg_pct = BacktestConfig(use_atr_sl_tp=False, **base_cfg_kwargs)
+    cfg_atr = BacktestConfig(use_atr_sl_tp=True, atr_tf="15", **base_cfg_kwargs)
+
+    m_pct = BacktestEngine(cfg_pct, score_fn=trivial_scorer).run(data, primary_tf="5")
+    m_atr = BacktestEngine(cfg_atr, score_fn=trivial_scorer).run(data, primary_tf="5")
+
+    assert_(m_pct["total"] > 0 and m_atr["total"] > 0,
+            f"both modes should produce trades; pct={m_pct['total']} atr={m_atr['total']}")
+
+    # The two modes will produce different exit prices, fees, etc.
+    # Check that at least ONE metric materially diverges (proves ATR path
+    # isn't silently falling back to the fixed pct).
+    diverged = (
+        m_pct["avg_loser_pct"] != m_atr["avg_loser_pct"]
+        or m_pct["avg_winner_pct"] != m_atr["avg_winner_pct"]
+        or m_pct["total"] != m_atr["total"]
+    )
+    assert_(diverged,
+            f"ATR and pct modes produced identical metrics — ATR path may not be active. "
+            f"pct: WR={m_pct['win_rate']} avg_L={m_pct['avg_loser_pct']} | "
+            f"atr: WR={m_atr['win_rate']} avg_L={m_atr['avg_loser_pct']}")
+    print(f"  [PASS] pct mode: avg_loser={m_pct['avg_loser_pct']:.2f}%  |  "
+          f"atr mode: avg_loser={m_atr['avg_loser_pct']:.2f}%")
+
+
 async def scenario_engine_skips_empty_anchor(main, mock: BybitMock) -> None:
     """Bug A regression test: when the FIRST symbol's primary TF is empty
     (e.g. cached as [] from a failed fetch), the engine must still run on
@@ -1150,6 +1269,8 @@ async def run_all() -> int:
         ("pagination_assembles_history", scenario_pagination_assembles_history),
         ("engine_skips_empty_anchor",    scenario_engine_skips_empty_anchor),
         ("no_cache_empty_results",       scenario_no_cache_empty_results),
+        ("metrics_breakdown_by_segment", scenario_metrics_breakdown_by_segment),
+        ("atr_sizing_differs_from_pct",  scenario_atr_sizing_differs_from_pct),
     ]
 
     results = []

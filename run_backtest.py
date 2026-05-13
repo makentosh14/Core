@@ -81,6 +81,15 @@ async def main():
         help="Slippage bps adverse on every fill (default: 5)",
     )
     parser.add_argument(
+        "--use-atr", action="store_true",
+        help="Use ATR-based dynamic SL/TP (per-symbol volatility-adaptive) "
+             "instead of fixed percentages",
+    )
+    parser.add_argument(
+        "--atr-tf", default="15",
+        help="Timeframe whose ATR to use for sizing (default: 15)",
+    )
+    parser.add_argument(
         "--verbose", action="store_true",
         help="Print every trade open/close",
     )
@@ -135,7 +144,11 @@ async def main():
         risk_per_trade_pct=args.risk,
         taker_fee_pct=args.fee,
         slippage_bps=args.slippage,
+        use_atr_sl_tp=args.use_atr,
+        atr_tf=args.atr_tf,
     )
+    if args.use_atr:
+        print(f"  [config] ATR-based SL/TP enabled (atr_tf={args.atr_tf})")
     engine = BacktestEngine(config, verbose=args.verbose)
 
     print(f"\nRunning backtest on {args.primary_tf}m primary timeline...")

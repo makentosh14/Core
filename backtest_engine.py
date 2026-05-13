@@ -76,11 +76,28 @@ class BacktestConfig:
     min_intraday_score: float = 12.0
     min_swing_score: float = 15.5
 
-    # Exit params per trade type — should match unified_exit_manager EXIT_CONFIG
+    # Exit params per trade type — should match unified_exit_manager EXIT_CONFIG.
+    # Used when use_atr_sl_tp is False (the default).
     exit_params: Dict[str, Dict[str, float]] = field(default_factory=lambda: {
         "Scalp":    {"sl_pct": 0.8, "tp1_pct": 1.2, "trailing_pct": 0.5, "breakeven_buffer": 0.25},
         "Intraday": {"sl_pct": 1.0, "tp1_pct": 2.0, "trailing_pct": 0.8, "breakeven_buffer": 0.25},
         "Swing":    {"sl_pct": 1.5, "tp1_pct": 3.5, "trailing_pct": 1.2, "breakeven_buffer": 0.30},
+    })
+
+    # ATR-based dynamic SL/TP. When True, SL/TP percentages are derived from
+    # current ATR rather than the fixed exit_params above. This adapts to
+    # symbol volatility — wider stops on volatile alts, tighter on slow majors.
+    use_atr_sl_tp: bool = False
+    atr_tf: str = "15"          # which timeframe's ATR to use for sizing
+    atr_period: int = 14
+    # ATR multipliers per trade type:
+    #   sl_price       = entry - sl_atr_mult × ATR (long)
+    #   tp1_price      = entry + tp1_atr_mult × ATR (long)
+    #   trailing_dist  = trail_atr_mult × ATR (as % of current price)
+    atr_multipliers: Dict[str, Dict[str, float]] = field(default_factory=lambda: {
+        "Scalp":    {"sl": 1.0, "tp1": 1.5, "trail": 0.6, "breakeven_buffer": 0.25},
+        "Intraday": {"sl": 1.5, "tp1": 2.5, "trail": 1.0, "breakeven_buffer": 0.25},
+        "Swing":    {"sl": 2.0, "tp1": 4.0, "trail": 1.5, "breakeven_buffer": 0.30},
     })
 
     # Warmup bars to skip at start of backtest so indicators have history.
@@ -172,23 +189,40 @@ class SimulatedExchange:
         mark_price: float,
         bar_idx: int,
         time_ms: int,
+        sl_pct: Optional[float] = None,
+        tp1_pct: Optional[float] = None,
+        trailing_pct: Optional[float] = None,
+        breakeven_buffer_pct: Optional[float] = None,
     ) -> Optional[SimPosition]:
+        """Open a position. SL/TP/trailing percentages can be passed as
+        overrides (e.g. from ATR-derived sizing); otherwise we fall back to
+        the trade-type defaults in cfg.exit_params."""
         if symbol in self.positions:
             return None
         if len(self.positions) >= self.cfg.max_concurrent_positions:
             return None
 
-        params = self.cfg.exit_params.get(
+        defaults = self.cfg.exit_params.get(
             trade_type, self.cfg.exit_params["Intraday"]
         )
+        if sl_pct is None:               sl_pct = defaults["sl_pct"]
+        if tp1_pct is None:              tp1_pct = defaults["tp1_pct"]
+        if trailing_pct is None:         trailing_pct = defaults["trailing_pct"]
+        if breakeven_buffer_pct is None: breakeven_buffer_pct = defaults["breakeven_buffer"]
+
+        # Sanity-clamp absurd values that can come out of bad ATR readings.
+        sl_pct = max(0.05, min(sl_pct, 10.0))
+        tp1_pct = max(0.05, min(tp1_pct, 20.0))
+        trailing_pct = max(0.05, min(trailing_pct, 10.0))
+
         entry_price = self._apply_slippage(mark_price, direction, "open")
 
         if direction == "long":
-            sl = entry_price * (1 - params["sl_pct"] / 100)
-            tp1 = entry_price * (1 + params["tp1_pct"] / 100)
+            sl = entry_price * (1 - sl_pct / 100)
+            tp1 = entry_price * (1 + tp1_pct / 100)
         else:
-            sl = entry_price * (1 + params["sl_pct"] / 100)
-            tp1 = entry_price * (1 - params["tp1_pct"] / 100)
+            sl = entry_price * (1 + sl_pct / 100)
+            tp1 = entry_price * (1 - tp1_pct / 100)
 
         # Size by risk %.
         risk_amount = self.balance * (self.cfg.risk_per_trade_pct / 100)
@@ -211,9 +245,9 @@ class SimulatedExchange:
             symbol=symbol, direction=direction, trade_type=trade_type,
             entry_price=entry_price, qty=qty, original_qty=qty,
             sl=sl, tp1=tp1,
-            sl_pct=params["sl_pct"], tp1_pct=params["tp1_pct"],
-            trailing_pct=params["trailing_pct"],
-            breakeven_buffer_pct=params["breakeven_buffer"],
+            sl_pct=sl_pct, tp1_pct=tp1_pct,
+            trailing_pct=trailing_pct,
+            breakeven_buffer_pct=breakeven_buffer_pct,
             entry_bar_idx=bar_idx, entry_time_ms=time_ms,
             fees_paid=entry_fee,
         )
@@ -425,7 +459,38 @@ def compute_metrics(
         "final_balance": round(final_balance, 2),
         "total_pnl_pct": round(total_pnl_pct, 2),
         "exit_reasons": exit_counts,
+        "by_trade_type": _segment_stats(trades, key=lambda t: t.trade_type),
+        "by_symbol":     _segment_stats(trades, key=lambda t: t.symbol),
+        "by_direction":  _segment_stats(trades, key=lambda t: t.direction),
     }
+
+
+def _segment_stats(trades: List[SimTrade], key) -> Dict[str, Dict[str, Any]]:
+    """Bucket trades by `key(trade)` and compute per-bucket stats."""
+    buckets: Dict[str, List[SimTrade]] = {}
+    for t in trades:
+        buckets.setdefault(key(t), []).append(t)
+    out: Dict[str, Dict[str, Any]] = {}
+    for name, ts in buckets.items():
+        wins = sum(1 for t in ts if t.pnl_usd > 0)
+        gain = sum(t.pnl_usd for t in ts if t.pnl_usd > 0)
+        loss = abs(sum(t.pnl_usd for t in ts if t.pnl_usd < 0))
+        if loss > 0:
+            pf: Any = round(gain / loss, 3)
+        elif gain > 0:
+            pf = "inf"
+        else:
+            pf = 0.0
+        out[name] = {
+            "count": len(ts),
+            "wins": wins,
+            "losses": len(ts) - wins - sum(1 for t in ts if t.pnl_usd == 0),
+            "win_rate": round(wins / len(ts), 4) if ts else 0.0,
+            "expectancy_pct": round(sum(t.pnl_pct for t in ts) / len(ts), 3) if ts else 0.0,
+            "total_pnl_usd": round(sum(t.pnl_usd for t in ts), 2),
+            "profit_factor": pf,
+        }
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -627,13 +692,48 @@ class BacktestEngine:
                 # Entry at the close of the current primary-TF bar.
                 entry_mark = float(candle["close"])
 
+                # ATR-based dynamic sizing: derive SL/TP/trailing percentages
+                # from the current ATR rather than the fixed exit_params.
+                atr_overrides: Dict[str, Optional[float]] = {
+                    "sl_pct": None, "tp1_pct": None, "trailing_pct": None,
+                }
+                if self.config.use_atr_sl_tp:
+                    atr_candles = view.get(self.config.atr_tf) or view.get(primary_tf, [])
+                    if len(atr_candles) >= self.config.atr_period + 1:
+                        try:
+                            from atr import calculate_atr
+                            atr = calculate_atr(
+                                atr_candles, period=self.config.atr_period, use_cache=False
+                            )
+                        except Exception as e:
+                            if self.verbose:
+                                print(f"[{symbol}@{current_time_ms}] ATR calc failed: {e}")
+                            atr = None
+                        if atr and atr > 0 and entry_mark > 0:
+                            mults = self.config.atr_multipliers.get(
+                                trade_type, self.config.atr_multipliers["Intraday"]
+                            )
+                            atr_pct = (atr / entry_mark) * 100  # ATR as %% of price
+                            atr_overrides["sl_pct"]       = atr_pct * mults["sl"]
+                            atr_overrides["tp1_pct"]      = atr_pct * mults["tp1"]
+                            atr_overrides["trailing_pct"] = atr_pct * mults["trail"]
+                            if self.verbose:
+                                print(f"[{symbol}@{current_time_ms}] ATR={atr:.6f} "
+                                      f"({atr_pct:.2f}% of price), SL={atr_overrides['sl_pct']:.2f}%, "
+                                      f"TP1={atr_overrides['tp1_pct']:.2f}%, "
+                                      f"trail={atr_overrides['trailing_pct']:.2f}%")
+
                 pos = self.exchange.open(
-                    symbol, direction, trade_type, entry_mark, bar_idx, current_time_ms
+                    symbol, direction, trade_type, entry_mark, bar_idx, current_time_ms,
+                    sl_pct=atr_overrides["sl_pct"],
+                    tp1_pct=atr_overrides["tp1_pct"],
+                    trailing_pct=atr_overrides["trailing_pct"],
                 )
                 if pos and self.verbose:
                     print(
                         f"[{symbol}@{current_time_ms}] OPEN {direction.upper()} {trade_type} "
-                        f"@ {entry_mark:.4f} qty={pos.qty:.4f} score={score:.2f}"
+                        f"@ {entry_mark:.4f} qty={pos.qty:.4f} score={score:.2f} "
+                        f"sl={pos.sl_pct:.2f}% tp1={pos.tp1_pct:.2f}% trail={pos.trailing_pct:.2f}%"
                     )
 
         # Force-close remaining positions at the last primary-TF bar.
@@ -870,9 +970,9 @@ async def load_history_for_symbols(
 
 def format_metrics_report(metrics: Dict[str, Any]) -> str:
     lines = []
-    lines.append("=" * 60)
+    lines.append("=" * 70)
     lines.append("BACKTEST RESULTS")
-    lines.append("=" * 60)
+    lines.append("=" * 70)
     lines.append(f"  Trades:                {metrics['total']}  ({metrics['wins']}W / {metrics['losses']}L / {metrics['breakeven']}BE)")
     lines.append(f"  Win rate:              {metrics['win_rate'] * 100:.1f}%")
     lines.append(f"  Profit factor:         {metrics['profit_factor']}")
@@ -881,15 +981,40 @@ def format_metrics_report(metrics: Dict[str, Any]) -> str:
     lines.append(f"  Expectancy / trade:    {metrics['expectancy_pct']:+.3f}%")
     lines.append(f"  Avg winner:            {metrics['avg_winner_pct']:+.2f}%")
     lines.append(f"  Avg loser:             {metrics['avg_loser_pct']:+.2f}%")
-    lines.append("-" * 60)
+    lines.append("-" * 70)
     lines.append(f"  Starting balance:      ${metrics['starting_balance']:.2f}")
     lines.append(f"  Final balance:         ${metrics['final_balance']:.2f}")
     lines.append(f"  Total return:          {metrics['total_pnl_pct']:+.2f}%")
-    lines.append("-" * 60)
+    lines.append("-" * 70)
     lines.append("  Exit reasons:")
     for reason, count in sorted(metrics["exit_reasons"].items(), key=lambda x: -x[1]):
         lines.append(f"    {reason:20s}  {count}")
-    lines.append("=" * 60)
+
+    def _render_segment(title: str, segments: Dict[str, Dict[str, Any]]):
+        if not segments:
+            return
+        lines.append("-" * 70)
+        lines.append(f"  By {title}:")
+        lines.append(
+            f"    {'name':<14}{'N':>5}{'WR%':>8}{'PF':>8}{'EV%':>10}{'P&L $':>12}"
+        )
+        # Sort by total_pnl_usd desc so winners are on top.
+        for name, s in sorted(
+            segments.items(), key=lambda kv: -kv[1].get("total_pnl_usd", 0)
+        ):
+            pf = s["profit_factor"]
+            pf_str = f"{pf}" if pf == "inf" else f"{pf:.2f}" if isinstance(pf, (int, float)) else str(pf)
+            lines.append(
+                f"    {name:<14}{s['count']:>5}{s['win_rate']*100:>7.1f}%"
+                f"{pf_str:>8}{s['expectancy_pct']:>+9.3f}%"
+                f"{s['total_pnl_usd']:>+12.2f}"
+            )
+
+    _render_segment("trade type", metrics.get("by_trade_type", {}))
+    _render_segment("direction",  metrics.get("by_direction", {}))
+    _render_segment("symbol",     metrics.get("by_symbol", {}))
+
+    lines.append("=" * 70)
     return "\n".join(lines)
 
 

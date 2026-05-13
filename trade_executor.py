@@ -475,7 +475,12 @@ async def execute_trade_core(
             if 'tp1_pct' in locals() and len(sl_tp_result) >= 5:
                 tp1_pct = sl_tp_result[4]
             
-            track_active_trade(
+            # CRITICAL FIX (Phase 1 Finding #11): track_active_trade is async.
+            # Missing await meant the coroutine was created and garbage-collected
+            # without ever executing — every trade was being placed on the exchange
+            # but never registered with the in-memory monitor. The "registered" log
+            # line below was misleading.
+            await track_active_trade(
                 symbol=symbol,
                 trade_type=trade_type,
                 initial_score=score,
@@ -488,7 +493,7 @@ async def execute_trade_core(
                 sl_order_id=sl_order_id,
                 qty=executed_qty
             )
-            
+
             log(f"✅ Trade registered with monitor for trailing management")
             
         except Exception as e:

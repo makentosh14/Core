@@ -36,17 +36,23 @@ def make_candles(n: int, base_price: float = 100.0, bullish: bool = True) -> Lis
 
     The data is realistic enough to not crash ATR/RSI/VWAP calculations.
     Direction is monotonic so the scoring pipeline can pick a side cleanly.
+    Timestamps end at "now" so the staleness guard (Phase 3 Fix #3) accepts them.
     """
+    import time as _time
     candles = []
     price = base_price
+    # Anchor newest candle at now (ms); generate one bar per minute going backwards.
+    now_ms = int(_time.time() * 1000)
     for i in range(n):
+        # i = 0 is the oldest; i = n-1 is newest (== now).
+        ts_ms = now_ms - (n - 1 - i) * 60_000
         step = 0.10 if bullish else -0.10
         open_ = price
         close = price + step
         high = max(open_, close) + 0.05
         low = min(open_, close) - 0.05
         candles.append({
-            "timestamp": 1700000000 + i * 60,
+            "timestamp": ts_ms,
             "open": open_,
             "high": high,
             "low": low,
@@ -708,6 +714,114 @@ async def scenario_sl_update_via_amend(main, mock: BybitMock) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PHASE 3 WEBSOCKET / STALENESS SCENARIOS
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def scenario_candle_dedup(main, mock: BybitMock) -> None:
+    """Phase 3 Fix #1 (showstopper): intra-bar WS updates with the same
+    timestamp must REPLACE the last deque entry, not append. Otherwise the
+    deque fills with duplicates and every indicator computes on garbage.
+    """
+    print("\n---- SCENARIO 8: candle dedup on timestamp (Fix #1) -------")
+    from collections import deque
+    from websocket_candles import _append_or_replace_candle
+
+    d = deque(maxlen=100)
+
+    # Three intra-bar updates for the same 1m bar (same timestamp).
+    _append_or_replace_candle(d, {"timestamp": 1_700_000_000_000, "close": "100.0"})
+    _append_or_replace_candle(d, {"timestamp": 1_700_000_000_000, "close": "100.5"})
+    _append_or_replace_candle(d, {"timestamp": 1_700_000_000_000, "close": "100.7"})
+    assert_(len(d) == 1, f"intra-bar updates must collapse to 1 entry; got {len(d)}")
+    assert_(d[-1]["close"] == "100.7",
+            f"last update must win; got {d[-1]['close']}")
+
+    # A new-timestamp message starts a new bar.
+    _append_or_replace_candle(d, {"timestamp": 1_700_000_060_000, "close": "101.0"})
+    assert_(len(d) == 2, f"new bar must append; got {len(d)}")
+
+    # Another intra-bar update on the second bar
+    _append_or_replace_candle(d, {"timestamp": 1_700_000_060_000, "close": "101.5"})
+    assert_(len(d) == 2, f"second bar's update must replace, not append; got {len(d)}")
+    assert_(d[-1]["close"] == "101.5", f"bar2 last update wrong: {d[-1]['close']}")
+
+    print(f"  [PASS] dedup correct: 3 ticks + 2 ticks -> 2 distinct bars")
+
+
+async def scenario_staleness_guard(main, mock: BybitMock) -> None:
+    """Phase 3 Fix #3: candles_are_fresh() must reject stale candles.
+    A 1m candle older than ~3 minutes should be considered stale; one
+    timestamped 'now' must be considered fresh."""
+    print("\n---- SCENARIO 9: candle staleness detector (Fix #3) -------")
+    import time as _time
+    from websocket_candles import candles_are_fresh
+
+    now_ms = int(_time.time() * 1000)
+
+    fresh = [{"timestamp": now_ms - 5_000}]            # 5 seconds old
+    stale = [{"timestamp": now_ms - 10 * 60_000}]      # 10 minutes old
+    ancient = [{"timestamp": now_ms - 60 * 60_000}]    # 1 hour old
+    empty: List[Dict[str, Any]] = []
+    bad_ts = [{"timestamp": 0}]
+
+    assert_(candles_are_fresh(fresh, "1") is True, "5s-old 1m candle should be fresh")
+    assert_(candles_are_fresh(stale, "1") is False, "10min-old 1m candle should be stale")
+    assert_(candles_are_fresh(ancient, "1") is False, "1hr-old candle should be stale")
+    assert_(candles_are_fresh(empty, "1") is False, "empty deque must be 'stale'")
+    assert_(candles_are_fresh(bad_ts, "1") is False, "zero timestamp must be 'stale'")
+
+    # Higher-interval candle: 1hr-old 1h candle is still fresh (max age 3hr)
+    assert_(candles_are_fresh(ancient, "60") is True,
+            "1hr-old 60m candle is well within the 3-bar grace window")
+    print(f"  [PASS] staleness boundaries correct across intervals")
+
+
+async def scenario_supervisor_restart(main, mock: BybitMock) -> None:
+    """Phase 3 Fix #2: supervise() must restart a crashing coroutine
+    transparently. Verify by counting executions of a flaky factory."""
+    print("\n---- SCENARIO 10: task supervisor restart (Fix #2) --------")
+    from task_supervisor import supervise
+
+    state = {"runs": 0, "alerts": []}
+
+    async def alert_fn(msg: str):
+        state["alerts"].append(msg)
+
+    async def flaky_coro():
+        state["runs"] += 1
+        # First two runs crash; third hangs (simulates a healthy long-lived task).
+        if state["runs"] < 3:
+            await asyncio.sleep(0.01)
+            raise RuntimeError(f"simulated crash #{state['runs']}")
+        # Healthy: wait until cancelled.
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(
+        supervise(
+            name="test_flaky",
+            coro_factory=flaky_coro,
+            base_backoff=0.05,
+            max_backoff=0.2,
+            alert_fn=alert_fn,
+        )
+    )
+
+    # Give the supervisor time to crash twice and start the third (healthy) run.
+    await asyncio.sleep(0.6)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert_(state["runs"] >= 3,
+            f"supervisor must restart on crash; got only {state['runs']} runs")
+    assert_(len(state["alerts"]) >= 2,
+            f"supervisor must fire alerts on each crash; got {len(state['alerts'])}")
+    print(f"  [PASS] supervisor restarted {state['runs']} times, fired {len(state['alerts'])} alerts")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # RUNNER
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -735,6 +849,10 @@ async def run_all() -> int:
         ("exit_cancels_residual_orders", scenario_exit_cancels_residual_orders),
         ("tp1_via_fill_detection",      scenario_tp1_via_fill_detection),
         ("sl_update_via_amend",         scenario_sl_update_via_amend),
+        # Phase 3 websocket / staleness scenarios
+        ("candle_dedup",                scenario_candle_dedup),
+        ("staleness_guard",             scenario_staleness_guard),
+        ("supervisor_restart",          scenario_supervisor_restart),
     ]
 
     results = []

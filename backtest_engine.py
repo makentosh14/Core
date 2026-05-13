@@ -641,6 +641,87 @@ class BacktestEngine:
 CACHE_DIR = Path(__file__).parent / ".backtest_cache"
 
 
+async def fetch_history_paginated(
+    symbol: str,
+    interval: str,
+    total_bars: int,
+    category: str = "linear",
+    rate_limit_sleep: float = 0.15,
+) -> List[dict]:
+    """Fetch `total_bars` candles by walking backwards from the most recent
+    bar using Bybit's `end` parameter. Bybit V5 caps a single request at
+    200 bars, so we loop until we have what we need or the server stops
+    returning history.
+
+    Returned candles are oldest-first, deduplicated by timestamp.
+    """
+    from bybit_api import signed_request
+
+    all_candles: List[dict] = []
+    end_ms: Optional[int] = None  # first request: no end → most recent bars
+
+    while len(all_candles) < total_bars:
+        batch_size = min(200, total_bars - len(all_candles))
+        params = {
+            "category": category,
+            "symbol": symbol,
+            "interval": interval,
+            "limit": str(batch_size),
+        }
+        if end_ms is not None:
+            params["end"] = str(end_ms)
+
+        resp = await signed_request("GET", "/v5/market/kline", params)
+        if resp.get("retCode") != 0:
+            raise RuntimeError(
+                f"Bybit kline error for {symbol} ({interval}m): {resp.get('retMsg')}"
+            )
+
+        raw = resp.get("result", {}).get("list", []) or []
+        if not raw:
+            # Server has no more history at this end_ms — stop.
+            break
+
+        # raw is newest-first; reverse so we get oldest-first per batch.
+        batch = [
+            {
+                "timestamp": int(c[0]),
+                "open":  str(c[1]),
+                "high":  str(c[2]),
+                "low":   str(c[3]),
+                "close": str(c[4]),
+                "volume": str(c[5]),
+            }
+            for c in reversed(raw)
+        ]
+        # This batch is older than what we have; prepend.
+        all_candles = batch + all_candles
+
+        # Next iteration: walk one ms before the oldest bar we just got.
+        oldest_ts = int(raw[-1][0])
+        new_end = oldest_ts - 1
+        if end_ms is not None and new_end >= end_ms:
+            # No progress made (server returned same data); avoid infinite loop.
+            break
+        end_ms = new_end
+
+        # Rate-limit politely.
+        await asyncio.sleep(rate_limit_sleep)
+
+    # Final dedup by timestamp + sort ascending (defensive — Bybit shouldn't
+    # send dupes across the boundary, but the `end=oldest-1` overlap math
+    # has edge cases).
+    seen = set()
+    out: List[dict] = []
+    for c in sorted(all_candles, key=lambda x: x["timestamp"]):
+        ts = c["timestamp"]
+        if ts in seen:
+            continue
+        seen.add(ts)
+        out.append(c)
+    return out
+
+
 async def load_or_fetch_history(
     symbol: str,
     interval: str,
@@ -648,7 +729,9 @@ async def load_or_fetch_history(
     category: str = "linear",
     use_cache: bool = True,
 ) -> List[dict]:
-    """Load historical candles. Tries disk cache first, falls back to REST."""
+    """Load historical candles. Tries disk cache first, falls back to REST.
+    When `limit > 200`, uses pagination to walk back further than one
+    Bybit request can reach."""
     CACHE_DIR.mkdir(exist_ok=True)
     cache_file = CACHE_DIR / f"{symbol}_{category}_{interval}_{limit}.json"
 
@@ -659,8 +742,15 @@ async def load_or_fetch_history(
         except Exception:
             pass  # fall through to REST
 
-    from websocket_candles import fetch_candles_rest
-    candles = await fetch_candles_rest(symbol, interval=interval, limit=limit, category=category)
+    if limit <= 200:
+        from websocket_candles import fetch_candles_rest
+        candles = await fetch_candles_rest(
+            symbol, interval=interval, limit=limit, category=category
+        )
+    else:
+        candles = await fetch_history_paginated(
+            symbol, interval=interval, total_bars=limit, category=category
+        )
 
     try:
         with open(cache_file, "w") as f:
@@ -669,6 +759,12 @@ async def load_or_fetch_history(
         pass
 
     return candles
+
+
+def days_to_bars(days: int, interval: str) -> int:
+    """Convert a day count to a bar count for the given interval."""
+    interval_sec = INTERVAL_SECONDS.get(interval, 60)
+    return (days * 86400) // interval_sec
 
 
 async def load_history_for_symbols(
@@ -729,5 +825,7 @@ __all__ = [
     "compute_metrics",
     "load_or_fetch_history",
     "load_history_for_symbols",
+    "fetch_history_paginated",
+    "days_to_bars",
     "format_metrics_report",
 ]

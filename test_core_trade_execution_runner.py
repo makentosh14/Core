@@ -893,6 +893,68 @@ async def scenario_backtest_fees_and_slippage(main, mock: BybitMock) -> None:
           f"real {m_real['expectancy_pct']:+.3f}% / drag {drag:.3f}% per trade")
 
 
+async def scenario_pagination_assembles_history(main, mock: BybitMock) -> None:
+    """Phase 5 pagination: fetch_history_paginated must walk backwards via
+    Bybit's `end` param and assemble distinct bars, no duplicates."""
+    print("\n---- SCENARIO 13: pagination assembles history correctly ---")
+    import bybit_api
+    from backtest_engine import fetch_history_paginated
+
+    # Build a deterministic "server" with 350 bars, 1 minute apart.
+    base_ts = 1_700_000_000_000  # ms
+    server_bars = [
+        [base_ts + i * 60_000, str(100 + i * 0.5), str(101 + i * 0.5),
+         str(99 + i * 0.5), str(100.5 + i * 0.5), str(1000), str(0)]
+        for i in range(350)
+    ]
+    # Bybit returns newest-first, so reverse for the mock to mimic that.
+    server_bars_newest_first = list(reversed(server_bars))
+
+    call_count = {"n": 0}
+
+    async def fake_signed_request(method, endpoint, params=None):
+        params = params or {}
+        if endpoint != "/v5/market/kline":
+            return {"retCode": 0, "result": {"list": []}}
+        call_count["n"] += 1
+        limit = int(params.get("limit", 200))
+        end_ms = params.get("end")
+        # Apply the `end` filter: keep only bars whose timestamp <= end_ms.
+        if end_ms is not None:
+            cutoff = int(end_ms)
+            bars = [b for b in server_bars_newest_first if int(b[0]) <= cutoff]
+        else:
+            bars = list(server_bars_newest_first)
+        # Return the most recent `limit` from the filtered set.
+        out = bars[:limit]
+        return {"retCode": 0, "result": {"list": out}}
+
+    # Patch signed_request module-globally so fetch_history_paginated picks it up.
+    original = bybit_api.signed_request
+    bybit_api.signed_request = fake_signed_request
+    try:
+        # Request 300 bars — should require 2 pages (200 + 100).
+        result = await fetch_history_paginated(
+            symbol="TESTUSDT", interval="1", total_bars=300,
+            category="linear", rate_limit_sleep=0.0,
+        )
+    finally:
+        bybit_api.signed_request = original
+
+    assert_(len(result) == 300, f"expected 300 bars, got {len(result)}")
+    assert_(call_count["n"] >= 2, f"expected >=2 paginated requests, got {call_count['n']}")
+
+    # Verify ordering (oldest-first) and no duplicates.
+    timestamps = [c["timestamp"] for c in result]
+    assert_(timestamps == sorted(timestamps), "result not sorted ascending")
+    assert_(len(set(timestamps)) == len(timestamps), "duplicate timestamps in result")
+
+    # Verify the assembled span is contiguous (each bar = 60000 ms apart).
+    deltas = {timestamps[i+1] - timestamps[i] for i in range(len(timestamps) - 1)}
+    assert_(deltas == {60_000}, f"non-contiguous bars; gap set {deltas}")
+    print(f"  [PASS] pagination: {len(result)} contiguous bars across {call_count['n']} requests")
+
+
 async def scenario_backtest_uptrend_profits(main, mock: BybitMock) -> None:
     """Phase 5 sanity check: a monotonic uptrend with realistic costs and
     a trivial breakout scorer must produce positive expectancy and
@@ -985,8 +1047,9 @@ async def run_all() -> int:
         ("staleness_guard",             scenario_staleness_guard),
         ("supervisor_restart",          scenario_supervisor_restart),
         # Phase 5 backtest engine scenarios
-        ("backtest_fees_and_slippage",  scenario_backtest_fees_and_slippage),
-        ("backtest_uptrend_profits",    scenario_backtest_uptrend_profits),
+        ("backtest_fees_and_slippage",   scenario_backtest_fees_and_slippage),
+        ("backtest_uptrend_profits",     scenario_backtest_uptrend_profits),
+        ("pagination_assembles_history", scenario_pagination_assembles_history),
     ]
 
     results = []

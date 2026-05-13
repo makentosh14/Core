@@ -26,8 +26,9 @@ import time
 from backtest_engine import (
     BacktestConfig,
     BacktestEngine,
+    days_to_bars,
     format_metrics_report,
-    load_history_for_symbols,
+    load_or_fetch_history,
 )
 
 
@@ -52,7 +53,12 @@ async def main():
     )
     parser.add_argument(
         "--bars", type=int, default=DEFAULT_BARS,
-        help="Bars per (symbol, interval) — max 200 (default: 200)",
+        help="Bars per (symbol, interval). Auto-paginates if >200 (default: 200)",
+    )
+    parser.add_argument(
+        "--days", type=int, default=None,
+        help="Days of history; overrides --bars per interval. "
+             "E.g. 30 = 8640 5m bars, 720 60m bars, etc.",
     )
     parser.add_argument(
         "--primary-tf", default="5",
@@ -87,10 +93,35 @@ async def main():
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
     intervals = [s.strip() for s in args.intervals.split(",") if s.strip()]
 
-    print(f"Loading history for {len(symbols)} symbols × {len(intervals)} TFs "
-          f"× {args.bars} bars each...")
+    # Determine bar count per interval. With --days, each TF gets its own bar
+    # count (1m needs ~1440 bars/day, 60m only 24).
+    bars_per_interval: dict = {}
+    for tf in intervals:
+        if args.days is not None:
+            bars_per_interval[tf] = days_to_bars(args.days, tf)
+        else:
+            bars_per_interval[tf] = args.bars
+
+    descr = (f"{args.days} days" if args.days is not None
+             else f"{args.bars} bars")
+    print(f"Loading history for {len(symbols)} symbols × {len(intervals)} TFs ({descr})...")
+    for tf in intervals:
+        print(f"  {tf}m: {bars_per_interval[tf]} bars")
+
     t0 = time.time()
-    candles = await load_history_for_symbols(symbols, intervals, limit=args.bars)
+    candles: dict = {}
+    for sym in symbols:
+        candles[sym] = {}
+        for tf in intervals:
+            try:
+                c = await load_or_fetch_history(
+                    sym, tf, limit=bars_per_interval[tf],
+                    use_cache=(not args.no_cache),
+                )
+                if c:
+                    candles[sym][tf] = c
+            except Exception as e:
+                print(f"⚠️ {sym} {tf}m fetch failed: {e}")
     print(f"  done in {time.time() - t0:.1f}s")
 
     # Sanity-check what we loaded.

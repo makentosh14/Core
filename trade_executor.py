@@ -230,22 +230,48 @@ async def execute_trade_core(
         sl_price = signal_data.get("sl_price", 0)
         tp1_price = signal_data.get("tp1_price", 0)
         qty = signal_data.get("qty", 0)
-        
-        # If SL/TP/qty not provided, we need to calculate them
-        if not all([sl_price > 0, tp1_price > 0, qty > 0]):
-            # Get candles for calculation
-            candles_by_tf = signal_data.get("candles", {})
-            
-            # Calculate SL/TP using the imported function
+        candles_by_tf = signal_data.get("candles", {})
+
+        # Risk normalization — used by both scalp hunter and standard path
+        if risk_per_trade > 1:
+            risk_decimal = risk_per_trade / 100
+        else:
+            risk_decimal = risk_per_trade
+        risk_decimal = min(risk_decimal, 0.03)  # hard cap at 3% per trade
 
         if signal_data.get("is_scalp_hunter") and signal_data.get("sl_price"):
+            # SCALP HUNTER path — SL/TP are pre-computed by scalp_hunter.py,
+            # but qty is NOT in signal_data. Previously this branch left qty=0,
+            # silently breaking every scalp-hunter trade. Compute it here.
             sl_price = float(signal_data["sl_price"])
             tp1_price = float(signal_data["tp1_price"])
             sl_pct = float(signal_data.get("sl_pct", 0.005))
             tp1_pct = float(signal_data.get("tp1_pct", 0.009))
             trailing_pct = float(signal_data.get("trailing_pct", 0.5))
-            log(f"✅ SCALP HUNTER: Using pre-calculated SL={sl_price:.6f} TP1={tp1_price:.6f}")
+
+            price_diff = abs(current_price - sl_price)
+            if price_diff <= 0 or current_price <= 0:
+                log(f"❌ SCALP HUNTER {symbol}: invalid price_diff={price_diff} / price={current_price}", level="ERROR")
+                return None
+
+            risk_amount = account_balance * risk_decimal
+            qty = round_qty(symbol, risk_amount / price_diff)
+
+            # 25%-of-balance position cap also applies to scalp hunter
+            max_position_value = account_balance * 0.25
+            position_value = qty * current_price
+            if position_value > max_position_value:
+                log(f"⚠️ SCALP HUNTER {symbol}: capping position from ${position_value:.2f} to ${max_position_value:.2f}")
+                qty = round_qty(symbol, max_position_value / current_price)
+
+            if qty <= 0:
+                log(f"❌ SCALP HUNTER {symbol}: qty rounded to {qty}, cannot execute", level="ERROR")
+                return None
+
+            log(f"✅ SCALP HUNTER: SL={sl_price:.6f} TP1={tp1_price:.6f} qty={qty} risk=${risk_amount:.2f}")
+            sl_tp_result = (sl_price, tp1_price, sl_pct, trailing_pct, tp1_pct)
         else:
+            # STANDARD path — calculate SL/TP and size from risk %
             sl_tp_result = calculate_dynamic_sl_tp(
                 candles_by_tf=candles_by_tf,
                 price=current_price,
@@ -255,41 +281,32 @@ async def execute_trade_core(
                 confidence=confidence,
                 regime=regime
             )
-            
-            if len(sl_tp_result) >= 5:
-                sl_price, tp1_price, sl_pct, trailing_pct, tp1_pct = sl_tp_result[:5]
-                
-                # Calculate position size based on risk - FIXED CALCULATION
-                # Handle both decimal (0.06) and percentage (6.0) formats
-                if risk_per_trade > 1:
-                    # Assume it's already a percentage, convert to decimal
-                    risk_decimal = risk_per_trade / 100
-                else:
-                    # Assume it's already a decimal
-                    risk_decimal = risk_per_trade
-                
-                # Cap maximum risk at 3% per trade for safety
-                risk_decimal = min(risk_decimal, 0.03)
-                
-                risk_amount = account_balance * risk_decimal
-                price_diff = abs(current_price - sl_price)
-                
-                if price_diff > 0:
-                    qty = risk_amount / price_diff
-                    qty = round_qty(symbol, qty)
-                    
-                    # SAFETY CHECK: Limit maximum position size
-                    max_position_value = account_balance * 0.25  # Max 25% of account per trade
-                    position_value = qty * current_price
-                    
-                    if position_value > max_position_value:
-                        log(f"⚠️ Position too large ({position_value:.2f}), capping at 25% of account ({max_position_value:.2f})")
-                        qty = round_qty(symbol, max_position_value / current_price)
-                        
-                    log(f"📊 Position sizing: Risk={risk_decimal*100:.1f}%, Amount=${risk_amount:.2f}, Qty={qty}, Value=${qty*current_price:.2f}")
-            else:
+
+            if not sl_tp_result or len(sl_tp_result) < 5:
                 log(f"❌ Failed to calculate SL/TP for {symbol}", level="ERROR")
                 return None
+
+            sl_price, tp1_price, sl_pct, trailing_pct, tp1_pct = sl_tp_result[:5]
+
+            price_diff = abs(current_price - sl_price)
+            if price_diff <= 0:
+                log(f"❌ {symbol}: SL distance is zero, refusing to trade", level="ERROR")
+                return None
+
+            risk_amount = account_balance * risk_decimal
+            qty = round_qty(symbol, risk_amount / price_diff)
+
+            max_position_value = account_balance * 0.25
+            position_value = qty * current_price
+            if position_value > max_position_value:
+                log(f"⚠️ Position too large ({position_value:.2f}), capping at 25% of account ({max_position_value:.2f})")
+                qty = round_qty(symbol, max_position_value / current_price)
+
+            if qty <= 0:
+                log(f"❌ {symbol}: qty rounded to {qty}, cannot execute", level="ERROR")
+                return None
+
+            log(f"📊 Position sizing: Risk={risk_decimal*100:.1f}%, Amount=${risk_amount:.2f}, Qty={qty}, Value=${qty*current_price:.2f}")
         
         log(f"📊 EXECUTING: {symbol} | Qty: {qty} | Entry: {current_price} | SL: {sl_price} | TP1: {tp1_price}")
         
@@ -300,26 +317,90 @@ async def execute_trade_core(
         
         # Step 2: Execute market order
         side = "Buy" if direction.lower() == "long" else "Sell"
-        
+
         result = await place_market_order(
             symbol=symbol,
             side=side,
             qty=str(qty),
             market_type=category
         )
-        
+
         if result.get("retCode") != 0:
             log(f"❌ Market order failed: {result.get('retMsg')}", level="ERROR")
             return None
-        
-        # Get execution details
-        order_info = result.get("result", {})
-        executed_qty = float(order_info.get("qty", qty))
-        avg_entry_price = float(order_info.get("price", current_price))
-        
-        log(f"✅ Market order executed: {executed_qty} units at {avg_entry_price}")
-        
-        # Step 3: Place Stop Loss order
+
+        # --- FIX: Bybit V5 market order response does NOT include fill price.
+        # Previously this code read `result.price` (often 0 / empty) and fell back
+        # to the pre-trade `current_price` snapshot. On any slippage event, SL/TP
+        # were anchored to the wrong price. Now we query the actual position to
+        # get avgPrice and size from the exchange's books.
+        order_id = result.get("result", {}).get("orderId", "")
+        log(f"🚀 Market order submitted: orderId={order_id}, intended qty={qty}")
+
+        # Give exchange a moment to settle the position
+        await asyncio.sleep(0.5)
+
+        avg_entry_price = 0.0
+        executed_qty = 0.0
+        for _attempt in range(3):
+            try:
+                pos_resp = await signed_request("GET", "/v5/position/list", {
+                    "category": category,
+                    "symbol": symbol,
+                })
+                if pos_resp.get("retCode") == 0:
+                    for pos in pos_resp.get("result", {}).get("list", []):
+                        if pos.get("symbol") != symbol:
+                            continue
+                        size = float(pos.get("size", 0) or 0)
+                        if size > 0:
+                            avg_entry_price = float(pos.get("avgPrice", 0) or 0)
+                            executed_qty = size
+                            break
+                if avg_entry_price > 0 and executed_qty > 0:
+                    break
+            except Exception as e:
+                log(f"⚠️ Position query attempt {_attempt+1} failed: {e}", level="WARN")
+            await asyncio.sleep(0.5)
+
+        if avg_entry_price <= 0 or executed_qty <= 0:
+            # Position may have filled but we can't confirm. Fall back to snapshot
+            # so downstream code has something usable, but flag prominently.
+            log(f"⚠️ {symbol}: could not confirm fill via /v5/position/list — "
+                f"falling back to snapshot price {current_price} and intended qty {qty}",
+                level="WARN")
+            avg_entry_price = current_price
+            executed_qty = qty
+            await send_error_to_telegram(
+                f"⚠️ {symbol}: order submitted but fill unconfirmed. "
+                f"Manual check advised (orderId={order_id})."
+            )
+
+        log(f"✅ Fill confirmed: qty={executed_qty} avgPrice={avg_entry_price}")
+
+        # --- FIX: Re-anchor SL/TP to the actual fill price.
+        # If slippage moved us, the pre-computed prices are off by the slip amount,
+        # which can mean a tight scalp SL ends up the wrong side of the fill.
+        if signal_data.get("is_scalp_hunter"):
+            # Scalp hunter has fixed % SL/TP — recompute from real entry
+            if direction.lower() == "long":
+                sl_price = round(avg_entry_price * (1 - sl_pct / 100), 6)
+                tp1_price = round(avg_entry_price * (1 + tp1_pct / 100), 6)
+            else:
+                sl_price = round(avg_entry_price * (1 + sl_pct / 100), 6)
+                tp1_price = round(avg_entry_price * (1 - tp1_pct / 100), 6)
+            log(f"🔄 Re-anchored scalp SL={sl_price} TP1={tp1_price} to actual fill")
+        else:
+            # Standard path uses fixed % from sl_tp_utils.FIXED_SL_TP
+            if direction.lower() == "long":
+                sl_price = round(avg_entry_price * (1 - sl_pct / 100), 6)
+                tp1_price = round(avg_entry_price * (1 + tp1_pct / 100), 6)
+            else:
+                sl_price = round(avg_entry_price * (1 + sl_pct / 100), 6)
+                tp1_price = round(avg_entry_price * (1 - tp1_pct / 100), 6)
+            log(f"🔄 Re-anchored SL={sl_price} TP1={tp1_price} to actual fill")
+
+        # Step 3: Place Stop Loss order (retries built-in via place_stop_loss_with_retry)
         sl_order_id = await place_stop_loss_order(
             symbol=symbol,
             direction=direction,
@@ -327,26 +408,58 @@ async def execute_trade_core(
             sl_price=sl_price,
             market_type=category
         )
-        
-        if not sl_order_id:
-            log(f"⚠️ SL placement failed for {symbol}", level="WARN")
-        
-        # Step 4: Place Take Profit order
-        tp1_qty = round_qty(symbol, executed_qty * 0.5)
 
-        tp1_order_id = await place_take_profit_order(
-            symbol=symbol,
-            direction=direction,
-            qty=tp1_qty,
-            tp_price=tp1_price,
-            market_type=category
-        )
+        # --- FIX: NAKED POSITION GUARD ---
+        # Previously: if SL placement failed, code just logged WARN and continued
+        # with an unprotected live position. That window of "filled but no stop"
+        # is where flash dumps cause >20% drawdowns. Now: close immediately.
+        if not sl_order_id:
+            log(f"🚨 SL PLACEMENT FAILED for {symbol} — closing position to avoid naked exposure", level="ERROR")
+            try:
+                close_side = "Sell" if direction.lower() == "long" else "Buy"
+                close_result = await place_market_order(
+                    symbol=symbol,
+                    side=close_side,
+                    qty=str(executed_qty),
+                    market_type=category,
+                    reduce_only=True,
+                )
+                if close_result.get("retCode") == 0:
+                    log(f"✅ Emergency close succeeded for {symbol} after SL failure")
+                else:
+                    log(f"❌ EMERGENCY CLOSE ALSO FAILED for {symbol}: {close_result.get('retMsg')}",
+                        level="ERROR")
+            except Exception as e:
+                log(f"❌ Exception during emergency close: {e}", level="ERROR")
+            await send_error_to_telegram(
+                f"🚨 {symbol}: SL placement failed after fill. "
+                f"Attempted emergency reduce-only close. CHECK POSITIONS MANUALLY."
+            )
+            return None
+
+        # Step 4: Place Take Profit (TP1) as a conditional market reduce-only.
+        # --- FIX: Previously this was a plain Limit + reduceOnly which can be
+        # skipped over by wicks on thin books, leaving the trade unfilled at TP1
+        # and trailing never activating. Conditional Market w/ triggerPrice
+        # guarantees execution once price touches the level.
+        tp1_qty = round_qty(symbol, executed_qty * 0.5)
+        if tp1_qty <= 0:
+            log(f"⚠️ TP1 qty rounded to 0 for {symbol} — skipping partial TP, full position rides SL/trail", level="WARN")
+            tp1_order_id = None
+        else:
+            tp1_order_id = await place_take_profit_order(
+                symbol=symbol,
+                direction=direction,
+                qty=tp1_qty,
+                tp_price=tp1_price,
+                market_type=category
+            )
 
         if signal_data.get("is_scalp_hunter"):
             tp1_partial_close = signal_data.get("tp1_partial_close", 0.5)
-        
-        if not tp1_order_id:
-            log(f"⚠️ TP1 placement failed for {symbol}", level="WARN")
+
+        if not tp1_order_id and tp1_qty > 0:
+            log(f"⚠️ TP1 placement failed for {symbol} — position has SL but no TP1. Monitor will manage exits.", level="WARN")
         
         # Step 5: Register with monitor for trailing management
         try:
@@ -498,31 +611,56 @@ async def place_stop_loss_order(symbol, direction, qty, sl_price, market_type="l
         return None
 
 async def place_take_profit_order(symbol, direction, qty, tp_price, market_type="linear"):
-    """Place take profit order"""
+    """
+    Place TP1 as a CONDITIONAL MARKET ORDER (triggerPrice + reduce-only),
+    not a plain Limit. Plain Limits can be skipped over by wicks on thin books,
+    leaving the position with no partial exit and trailing never activated.
+
+    Trigger direction:
+      - Long position closes at TP via Sell triggered when price RISES to tp_price → triggerDirection=1
+      - Short position closes at TP via Buy triggered when price FALLS to tp_price → triggerDirection=2
+    """
     try:
         side = "Sell" if direction.lower() == "long" else "Buy"
-        
-        log(f"💰 Placing TP1 order for {symbol}: {side} at {tp_price}")
-        
-        result = await signed_request("POST", "/v5/order/create", {
+        trigger_direction = 1 if direction.lower() == "long" else 2
+
+        log(f"💰 Placing conditional TP1 for {symbol}: {side} triggered at {tp_price} (dir={trigger_direction})")
+
+        payload = {
             "category": market_type,
             "symbol": symbol,
             "side": side,
-            "orderType": "Limit",
+            "orderType": "Market",
             "qty": str(qty),
-            "price": str(tp_price),
+            "triggerPrice": str(tp_price),
+            "triggerDirection": trigger_direction,
+            "triggerBy": "LastPrice",
             "timeInForce": "GTC",
-            "reduceOnly": True
-        })
-        
+            "reduceOnly": True,
+            "closeOnTrigger": False,  # partial — do not close entire position
+            "orderFilter": "Stop",
+        }
+
+        result = await signed_request("POST", "/v5/order/create", payload)
+
         if result.get("retCode") == 0:
             order_id = result.get("result", {}).get("orderId")
-            log(f"✅ TP1 order placed: {order_id}")
+            log(f"✅ TP1 conditional order placed: {order_id}")
             return order_id
         else:
-            log(f"❌ Failed to place TP1: {result.get('retMsg')}", level="ERROR")
+            err = result.get("retMsg", "")
+            log(f"❌ Failed to place TP1 conditional: {err}", level="ERROR")
+            # If exchange rejected triggerDirection, retry with opposite direction
+            # (some Bybit endpoints differ on convention). One retry only — no loop.
+            if "triggerdirection" in err.lower() or "trigger price" in err.lower():
+                payload["triggerDirection"] = 2 if trigger_direction == 1 else 1
+                log(f"🔄 Retrying TP1 with flipped triggerDirection={payload['triggerDirection']}")
+                retry = await signed_request("POST", "/v5/order/create", payload)
+                if retry.get("retCode") == 0:
+                    return retry.get("result", {}).get("orderId")
+                log(f"❌ TP1 retry also failed: {retry.get('retMsg')}", level="ERROR")
             return None
-            
+
     except Exception as e:
         log(f"❌ Error placing TP1: {e}", level="ERROR")
         return None

@@ -1144,15 +1144,18 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
         indicator_scores["4h_gate"] = gate_adj
         log(f"📊 4H gate for {symbol}: {gate_adj:+.2f} ({gate_reason})")
 
-    # Momentum bonus
-        if has_momentum and best_score > 6.0 and momentum_direction:
-            direction = determine_direction(tf_scores)
+    # Momentum bonus — only fire when momentum is real AND aligned with TF consensus.
+    # Previous version had broken indentation that nested this inside the 4h block
+    # and dereferenced `expected_direction` before it was bound (NameError when
+    # has_momentum was False). Fixed: bind & check in one guarded block.
+    if has_momentum and best_score > 6.0 and momentum_direction:
+        direction = determine_direction(tf_scores)
+        if direction is not None:
             expected_direction = "bullish" if direction == "Long" else "bearish"
-        
-        if momentum_direction == expected_direction:
-            bonus = 0.8
-            best_score += bonus
-            log(f"🚀 Momentum bonus applied to {symbol}: +{bonus} (aligned {momentum_direction})")
+            if momentum_direction == expected_direction:
+                bonus = 0.8
+                best_score += bonus
+                log(f"🚀 Momentum bonus applied to {symbol}: +{bonus} (aligned {momentum_direction})")
 
     return round(best_score, 2), tf_scores, best_type, indicator_scores, list(used_indicators)
 

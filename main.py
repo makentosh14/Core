@@ -23,7 +23,8 @@ from typing import Dict, Any, Optional, List
 
 # Core imports
 from scanner import fetch_symbols
-from websocket_candles import live_candles, stream_candles, SUPPORTED_INTERVALS
+from websocket_candles import live_candles, stream_candles, SUPPORTED_INTERVALS, candles_are_fresh
+from task_supervisor import supervise
 from score import (
     score_symbol, enhanced_score_symbol, determine_direction, calculate_confidence,
     has_pump_potential, detect_momentum_strength
@@ -794,6 +795,19 @@ async def core_strategy_scan(symbols: List[str], trend_context: Dict):
                         trade_lock_manager.release_trade_lock(symbol, False)
                         continue
 
+                    # Phase 3 Fix #3: refuse to score a symbol whose feed has gone stale.
+                    # Without this, a dead WebSocket means the bot signals on old data.
+                    stale_tf = next(
+                        (tf for tf, c in core_candles.items() if not candles_are_fresh(c, tf)),
+                        None,
+                    )
+                    if stale_tf is not None:
+                        log(f"⏭️ {symbol}: stale {stale_tf}m candles "
+                            f"(last_ts={core_candles[stale_tf][-1].get('timestamp')})",
+                            level="DEBUG")
+                        trade_lock_manager.release_trade_lock(symbol, False)
+                        continue
+
                     scanned_count += 1
 
                     # === CORE STRATEGY SIGNAL GENERATION ===
@@ -1055,6 +1069,33 @@ async def core_monitor_loop():
 # BOT LIFECYCLE
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Tracked background tasks so restart_forever can cancel the previous
+# generation cleanly on crash (Phase 3 Fix #8).
+_background_tasks: List[asyncio.Task] = []
+
+
+def _spawn_supervised(name: str, coro_factory) -> asyncio.Task:
+    """Spawn a long-lived background task under the supervisor (Phase 3 Fix #2).
+    Tracks the task in _background_tasks so it can be cancelled on bot restart."""
+    task = asyncio.create_task(
+        supervise(name, coro_factory, alert_fn=send_error_to_telegram)
+    )
+    _background_tasks.append(task)
+    return task
+
+
+async def cancel_background_tasks() -> None:
+    """Cancel all supervised background tasks (Phase 3 Fix #8). Used by
+    restart_forever to clean up the previous bot generation."""
+    if not _background_tasks:
+        return
+    log(f"🧹 Cancelling {len(_background_tasks)} background tasks before restart")
+    for t in _background_tasks:
+        t.cancel()
+    await asyncio.gather(*_background_tasks, return_exceptions=True)
+    _background_tasks.clear()
+
+
 async def run_core_bot():
     """Core strategy bot - simplified and focused"""
     log("🚀 CORE STRATEGY BOT starting...")
@@ -1069,14 +1110,18 @@ async def run_core_bot():
     if len(active_trades) == 0:
         await recover_active_trades_from_exchange()
 
-    asyncio.create_task(stream_candles(symbols))
-    asyncio.create_task(core_monitor_loop())
-    asyncio.create_task(monitor_active_trades())
-    asyncio.create_task(monitor_btc_trend_accuracy())
-    asyncio.create_task(monitor_altseason_status())
-    asyncio.create_task(periodic_trade_sync())
-    asyncio.create_task(bybit_sync_loop(120))
-    asyncio.create_task(lock_manager_maintenance())
+    # All long-lived background loops run under the supervisor. The
+    # supervisor restarts on exception/return with exponential backoff
+    # and (throttled) Telegram alerting (Phase 3 Fix #2, #5, #8).
+    _background_tasks.clear()
+    _spawn_supervised("stream_candles",        lambda: stream_candles(symbols))
+    _spawn_supervised("core_monitor_loop",     core_monitor_loop)
+    _spawn_supervised("monitor_active_trades", monitor_active_trades)
+    _spawn_supervised("monitor_btc_trend",     monitor_btc_trend_accuracy)
+    _spawn_supervised("monitor_altseason",     monitor_altseason_status)
+    _spawn_supervised("periodic_trade_sync",   periodic_trade_sync)
+    _spawn_supervised("bybit_sync_loop",       lambda: bybit_sync_loop(120))
+    _spawn_supervised("lock_manager_maint",    lock_manager_maintenance)
 
     await asyncio.sleep(5)
     log("🚀 CORE STRATEGY BOT fully initialized - starting main loop")
@@ -1156,14 +1201,21 @@ if __name__ == "__main__":
         f"Swing: {MAX_SWING_POSITIONS}")
 
     async def restart_forever():
-        """Core strategy restart mechanism with crash recovery"""
+        """Core strategy restart mechanism with crash recovery.
+        Phase 3 Fix #8: cancel the previous task generation before respawning
+        so we don't leak WebSocket connections across crashes."""
         while True:
             try:
                 await run_core_bot()
-            except Exception as e:
+            except Exception:
                 err_msg = f"🔁 Restarting CORE STRATEGY bot due to crash:\n{traceback.format_exc()}"
                 log(err_msg, level="ERROR")
                 await send_error_to_telegram(err_msg)
+                # Cancel and drain the previous generation of background tasks.
+                try:
+                    await cancel_background_tasks()
+                except Exception as cancel_err:
+                    log(f"⚠️ background task cleanup failed: {cancel_err}", level="WARN")
                 await asyncio.sleep(10)
 
     # Windows: switch to SelectorEventLoop to avoid noisy ConnectionResetError

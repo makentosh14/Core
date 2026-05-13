@@ -1074,6 +1074,62 @@ async def scenario_atr_sizing_differs_from_pct(main, mock: BybitMock) -> None:
           f"atr mode: avg_loser={m_atr['avg_loser_pct']:.2f}%")
 
 
+async def scenario_per_symbol_score_adjustment(main, mock: BybitMock) -> None:
+    """Phase 6: symbols listed in symbol_score_adjustment must have the
+    adjustment applied to their score BEFORE the gate check. A symbol with
+    a raw score above the gate but a penalty that pushes it below should
+    NOT trade; a non-listed symbol with the same raw score should."""
+    print("\n---- SCENARIO 18: per-symbol score adjustment (Phase 6) ---")
+    from backtest_engine import BacktestConfig, BacktestEngine
+
+    # Trivial scorer that returns the same fixed score for ANY symbol.
+    # Score = 13.0 is above the default Intraday gate (12.0) but inside
+    # the 12.0 + 2.0 penalty range. With BTCUSDT in the adjustment list at
+    # -2.0, BTC's adjusted score drops to 11.0 (below gate). Other symbols
+    # with no adjustment stay at 13.0 (above gate).
+    def fixed_scorer(symbol, candles_by_tf, trend_context):
+        bars = candles_by_tf.get("5", [])
+        if len(bars) < 11:
+            return (0.0, {"5": 0.0}, "Intraday", {}, [])
+        return (13.0, {"5": 3.0, "1": 3.0}, "Intraday",
+                {"x": 1.0}, ["x"])
+
+    # Build a simple uptrend so the trivial scorer fires consistently.
+    base = 100.0
+    bars = []
+    price = base
+    for i in range(150):
+        price *= 1.004
+        bars.append({
+            "timestamp": 1_700_000_000_000 + i * 60_000,
+            "open": price * 0.999, "high": price * 1.004,
+            "low": price * 0.997, "close": price, "volume": 1000.0 + i,
+        })
+    data = {
+        "BTCUSDT":  {"1": bars, "5": bars, "15": bars, "60": bars},
+        "FOOUSDT":  {"1": bars, "5": bars, "15": bars, "60": bars},
+    }
+
+    cfg = BacktestConfig(
+        starting_balance=1000.0, risk_per_trade_pct=2.0,
+        taker_fee_pct=0.055, slippage_bps=5.0,
+        min_scalp_score=12.0, min_intraday_score=12.0, min_swing_score=12.0,
+        warmup_bars=25,
+        symbol_score_adjustment={"BTCUSDT": -2.0},
+    )
+    engine = BacktestEngine(cfg, score_fn=fixed_scorer)
+    m = engine.run(data, primary_tf="5", btc_symbol="BTCUSDT")
+
+    by_sym = m.get("by_symbol", {})
+    btc_count = by_sym.get("BTCUSDT", {}).get("count", 0)
+    foo_count = by_sym.get("FOOUSDT", {}).get("count", 0)
+
+    # FOO has raw 13.0 (passes gate 12.0). BTC has 13.0 - 2.0 = 11.0 (below gate).
+    assert_(btc_count == 0, f"BTC should have 0 trades after penalty; got {btc_count}")
+    assert_(foo_count > 0, f"FOO should have trades (no penalty); got {foo_count}")
+    print(f"  [PASS] BTC blocked by -2.0 adjustment (0 trades); FOO traded {foo_count} times")
+
+
 async def scenario_engine_skips_empty_anchor(main, mock: BybitMock) -> None:
     """Bug A regression test: when the FIRST symbol's primary TF is empty
     (e.g. cached as [] from a failed fetch), the engine must still run on
@@ -1271,6 +1327,8 @@ async def run_all() -> int:
         ("no_cache_empty_results",       scenario_no_cache_empty_results),
         ("metrics_breakdown_by_segment", scenario_metrics_breakdown_by_segment),
         ("atr_sizing_differs_from_pct",  scenario_atr_sizing_differs_from_pct),
+        # Phase 6 signal-bias mitigation
+        ("per_symbol_score_adjustment",  scenario_per_symbol_score_adjustment),
     ]
 
     results = []

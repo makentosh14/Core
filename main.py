@@ -92,6 +92,41 @@ EARLY_CONFIDENCE_GATE = 68      # was 60
 # Confirmations required
 MIN_CONFIRMATIONS = 3           # was 2
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 6 audit: per-symbol score adjustments to mitigate the training-data
+# bias in score.py WEIGHTS.
+#
+# Background: the WEIGHTS were tuned on a backscan of 9,343 pump/dump events
+# (indicator_backscan.py, PUMP_PCT=3.0). That dataset is a pure positive-class
+# set — only confirmed 3%+ moves on 15m — so the weights have high recall on
+# pumps but terrible precision against non-events. The bias hits BTC/ETH
+# especially hard because they don't pump on 15m the way small alts do; the
+# weights still fire on noise that LOOKS pre-pump, but no pump follows.
+#
+# The 7-day backtest evidence:
+#     BTCUSDT  PF 0.35 / WR 20%   ← weights firing on noise
+#     ETHUSDT  PF 0.57 / WR 25%
+#     SOLUSDT  PF 1.60 / WR 50%
+#     BNBUSDT  PF 3.04 / WR 67%   ← weights firing on real pumps
+#
+# Until the backscan is rebuilt with a negative-class (TODO), we offset the
+# bias here: majors get a fixed score penalty so they need stronger signals
+# to clear the gate. Tune by re-running run_backtest.py and watching per-
+# symbol PFs converge toward 1.0+ across the basket.
+# ─────────────────────────────────────────────────────────────────────────────
+SYMBOL_SCORE_ADJUSTMENT: Dict[str, float] = {
+    "BTCUSDT": -2.0,   # bias offset — majors require stronger signal
+    "ETHUSDT": -2.0,
+    # Everything else: 0.0 by default (handled in helper).
+}
+
+
+def get_symbol_score_adjustment(symbol: str) -> float:
+    """Returns the bias-offset adjustment to apply to a raw score before the
+    trade-type gate check. Negative for symbols whose signals tend to be
+    false positives under the current weights."""
+    return SYMBOL_SCORE_ADJUSTMENT.get(symbol, 0.0)
+
 # Core Strategy Risk Management
 CORE_RISK_PERCENTAGES = {
     "Scalp":        0.025,   # 2.5% risk for scalps
@@ -832,8 +867,19 @@ async def core_strategy_scan(symbols: List[str], trend_context: Dict):
                         trade_lock_manager.release_trade_lock(symbol, False)
                         continue
 
-                    # 2. Calculate core score (base + small bonus)
-                    core_score = score + _calculate_momentum_and_regime_bonus(symbol, core_candles, trend_context)
+                    # 2. Calculate core score (base + small bonus + per-symbol bias offset).
+                    # The bias offset is the Phase 6 mitigation — see SYMBOL_SCORE_ADJUSTMENT
+                    # at the top of this file for the rationale (training-data survivorship bias).
+                    bias_adj = get_symbol_score_adjustment(symbol)
+                    core_score = (
+                        score
+                        + _calculate_momentum_and_regime_bonus(symbol, core_candles, trend_context)
+                        + bias_adj
+                    )
+                    if bias_adj != 0:
+                        log(f"📐 {symbol}: applied bias adjustment {bias_adj:+.1f} "
+                            f"(raw_score={score:.2f}, adjusted={core_score:.2f})",
+                            level="DEBUG")
 
                     # 3. Determine direction
                     direction = determine_core_direction(core_candles, trend_context)

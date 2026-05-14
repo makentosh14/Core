@@ -33,7 +33,10 @@ from telegram_bot import send_telegram_message, format_trade_signal, send_error_
 from trend_filters import monitor_btc_trend_accuracy, monitor_altseason_status, validate_short_signal
 from trend_upgrade_integration import get_trend_context_cached
 from signal_memory import log_signal, is_duplicate_signal
-from config import DEFAULT_LEVERAGE, ALWAYS_ALLOW_SWING, ALTSEASON_MODE, NORMAL_MAX_POSITIONS
+from config import (
+    DEFAULT_LEVERAGE, ALWAYS_ALLOW_SWING, ALTSEASON_MODE, NORMAL_MAX_POSITIONS,
+    ENABLE_CORE_STRATEGY, ENABLE_SCALP_HUNTER,
+)
 from performance_tracker import track_signal
 from logger import log
 from bybit_sync import sync_bot_with_bybit
@@ -75,9 +78,13 @@ SIGNAL_COOLDOWN_TIME = 3600  # 1 hour cooldown after signal
 EXIT_COOLDOWN = 120          # 2 minutes cooldown after exit
 
 # ── QUALITY PATCH: tightened score thresholds ────────────────────────────────
-MIN_SCALP_SCORE    = 10.5    # was 9.0   — only top scalps
-MIN_INTRADAY_SCORE = 12.0    # was 10.0  — only top intraday
-MIN_SWING_SCORE    = 15.5    # was 14.0  — only top swings
+# Diagnosis fix (no scalps): MIN_SCALP_SCORE 10.5 was almost-unreachable for
+# the Scalp tier given it only accumulates points from 1-2 TFs while Intraday
+# accumulates from 5m+15m. Lowered to 9.0 to make Scalp viable; works in
+# concert with the rebalanced TF bonuses in score.py.
+MIN_SCALP_SCORE    = 9.0     # was 10.5 — Scalp tier needs lower bar
+MIN_INTRADAY_SCORE = 12.0    # unchanged
+MIN_SWING_SCORE    = 15.5    # unchanged
 
 # QUALITY PATCH: tightened confidence/strength tiers (used in determine_core_strategy_type)
 MIN_SCALP_CONFIDENCE    = 70    # was 65
@@ -144,7 +151,8 @@ MAX_INTRADAY_POSITIONS = 1   # Maximum 1 intraday position
 MAX_SWING_POSITIONS    = 1   # Maximum 1 swing position
 
 # <<< SCALP HUNTER >>>
-SCALP_HUNTER_ENABLED       = True
+# Backed by config.ENABLE_SCALP_HUNTER (was hardcoded True).
+SCALP_HUNTER_ENABLED       = ENABLE_SCALP_HUNTER
 SCALP_HUNTER_SIGNALS_ONLY  = False
 SCALP_RISK_PCT             = 0.01
 MAX_SCALP_CONCURRENT       = 2
@@ -810,15 +818,19 @@ async def core_strategy_scan(symbols: List[str], trend_context: Dict):
                     if _diag:
                         log(f"🟢 DIAG {symbol}: passed all pre-candle checks", level="DEBUG")
 
-                    # Get candles for core timeframes
+                    # Get candles for core timeframes.
+                    # Diagnosis fix (no scalps): added '3' so the Scalp tier
+                    # actually has its 2nd TF available, enabling the 1.25x
+                    # bonus and making score_symbol's max(type_scores) pick
+                    # Scalp on legitimately fast-moving symbols.
                     core_candles = {}
                     src = fix_live_candles_structure({symbol: live_candles.get(symbol, {})}).get(symbol, {})
 
-                    for tf in ['1', '5', '15']:
+                    for tf in ['1', '3', '5', '15']:
                         tf_data = src.get(tf)
                         if tf_data:
                             candles = list(tf_data)
-                            min_needed = 12 if tf in ('1', '5') else 8
+                            min_needed = 12 if tf in ('1', '3', '5') else 8
                             if len(candles) >= min_needed:
                                 core_candles[tf] = candles
 

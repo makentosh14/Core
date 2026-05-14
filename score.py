@@ -279,11 +279,14 @@ def check_4h_alignment_veto(candles_by_timeframe, direction):
             return False, f"4h_bearish_veto({bearish_signals_4h}/3)"
         if direction == "Short" and bullish_signals_4h >= 2:
             return False, f"4h_bullish_veto({bullish_signals_4h}/3)"
-        
-        # NEW: Explicit uptrend veto for Short
-        if direction == "Short" and bullish_signals_4h >= 1:
-            return False, f"4h_uptrend_veto_short({bullish_signals_4h})"
-        
+
+        # Diagnosis fix (no shorts): the previous "bullish_signals_4h >= 1
+        # → veto short" line made shorts mathematically near-impossible to
+        # generate. ANY single mildly-bullish 4h signal (Supertrend OR MACD
+        # OR momentum) would reject every short outright. Combined with the
+        # 2+ rule above we already have a real bullish-veto. Removed the
+        # 1-signal veto so symmetric long/short logic actually works.
+
         return True, "4h_aligned"
     except Exception as e:
         log(f"⚠️ 4h veto check failed: {e}", level="WARN")
@@ -296,16 +299,26 @@ def check_4h_alignment_veto(candles_by_timeframe, direction):
 
 def check_not_chasing(candles_by_timeframe, direction, trade_type):
     """
-    QUALITY PATCH: Don't enter when price already moved 1%+ in direction
-    in the last few candles. You're chasing the move, not catching it.
+    Block already-extended entries — but not so tightly that you miss
+    actual breakouts.
+
+    Diagnosis fix (big movers missed): previous thresholds (1.0% / 1.8% /
+    3.0%) were tighter than the typical pre-signal lag of the scoring
+    chain. By the time MACD/Supertrend confirmed a move, price had
+    already moved that much and anti-chase blocked the entry. Loosened
+    to thresholds that match observed signal-to-entry lag:
+      Scalp:    2.0% over 3 × 1m bars
+      Intraday: 3.0% over 3 × 5m bars
+      Swing:    5.0% over 4 × 15m bars
+
     Returns (allow: bool, reason: str).
     """
     if trade_type == "Scalp":
-        tf, max_recent_move_pct, lookback = "1", 1.0, 3
+        tf, max_recent_move_pct, lookback = "1", 2.0, 3
     elif trade_type == "Intraday":
-        tf, max_recent_move_pct, lookback = "5", 1.8, 3
+        tf, max_recent_move_pct, lookback = "5", 3.0, 3
     else:  # Swing
-        tf, max_recent_move_pct, lookback = "15", 3.0, 4
+        tf, max_recent_move_pct, lookback = "15", 5.0, 4
 
     candles = candles_by_timeframe.get(tf, [])
     if len(candles) < lookback + 1:
@@ -1085,10 +1098,19 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
         tf_scores[tf] = round(score, 2)
 
     # ── Apply timeframe bonuses ──────────────────────────────────────────────
-    if type_scores["Scalp"] > 0 and tf_count["Scalp"] >= 2:
-        type_scores["Scalp"] *= 1.2
+    # Diagnosis fix (no scalps): the previous rule gave Intraday a 1.15x
+    # bonus whenever it had its 2 TFs (5m+15m, almost always), and gave
+    # Scalp 1.2x only with 2 TFs (1m AND 3m, rarely both present). Net
+    # effect: Intraday almost always won the `max(type_scores)` selection
+    # and Scalp tier was effectively dead. Rebalanced so Scalp gets a
+    # SOLO-tf modest bonus and Intraday's bonus is smaller.
+    if type_scores["Scalp"] > 0:
+        if tf_count["Scalp"] >= 2:
+            type_scores["Scalp"] *= 1.25
+        else:
+            type_scores["Scalp"] *= 1.10   # solo-1m still gets a small bonus
     if type_scores["Intraday"] > 0 and tf_count["Intraday"] >= 2:
-        type_scores["Intraday"] *= 1.15
+        type_scores["Intraday"] *= 1.08    # was 1.15
 
     # ── Find best trade type ─────────────────────────────────────────────────
     valid_types = [t for t in type_scores if tf_count[t] >= MIN_TF_REQUIRED[t]]

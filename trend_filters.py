@@ -1080,26 +1080,51 @@ async def validate_short_signal(symbol, candles_by_tf):
         altseason_strength = context.get('altseason_strength', 0)
         is_altseason = context.get('altseason', False)
 
-        # Step 1: BTC trend and confidence check
-        if btc_trend not in ['downtrend', 'ranging']:
+        # Step 1: BTC trend and confidence check.
+        #
+        # Diagnosis fix (no shorts): the bot uses multiple vocabularies for
+        # the same concept:
+        #   score.py / main.py:  "bullish" / "bearish" / "neutral"
+        #   this file (older):   "uptrend" / "downtrend" / "ranging"
+        # When enhanced_trend_filters emits "bearish", the strict list below
+        # was rejecting it (because 'bearish' is not in ['downtrend','ranging']).
+        # Accept both vocabularies so shorts can actually generate.
+        SHORT_FRIENDLY_TRENDS = {
+            'downtrend', 'bearish', 'strong_bearish',
+            'ranging', 'neutral', 'consolidating',
+        }
+        if btc_trend not in SHORT_FRIENDLY_TRENDS:
             log(f"❌ {symbol}: BTC trend is {btc_trend}, not short-friendly")
             return False
-        if btc_trend == 'downtrend' and btc_confidence < 65:
-            log(f"❌ {symbol}: BTC downtrend confidence too low ({btc_confidence:.1f}%)")
+
+        # Confidence check applies when trend is one of the explicitly bearish ones.
+        if btc_trend in ('downtrend', 'bearish', 'strong_bearish') and btc_confidence < 65:
+            log(f"❌ {symbol}: BTC bearish confidence too low ({btc_confidence:.1f}%)")
             return False
 
-        # Step 2: Recent bullish candles (5m)
+        # Step 2: Recent bullish candles (5m).
+        # Previously: > 2 (i.e. 3+) bullish candles rejected. With normal market
+        # noise even in a downtrend you frequently see 3-of-5 green candles
+        # during a bounce. Loosened to >= 4 so only a clearly bullish 5-bar
+        # sequence (4-5 of 5 green) rejects.
         recent_candles = candles_by_tf['5'][-5:]
         bullish_candles = sum(1 for c in recent_candles if float(c['close']) > float(c['open']))
-        if bullish_candles > 2:
+        if bullish_candles >= 4:
             log(f"❌ {symbol}: Too many recent bullish candles ({bullish_candles}/5)")
             return False
 
         # Step 3: Macro indicator scoring (custom logic)
         indicator_scores = {}
 
-        # BTC trend impact
-        indicator_scores['btc_trend'] = -1.5 if btc_trend == 'downtrend' else (-0.5 if btc_trend == 'ranging' else 0.3)
+        # BTC trend impact. Use the broadened vocab.
+        bearish_trends = {'downtrend', 'bearish', 'strong_bearish'}
+        sideways_trends = {'ranging', 'neutral', 'consolidating'}
+        if btc_trend in bearish_trends:
+            indicator_scores['btc_trend'] = -1.5
+        elif btc_trend in sideways_trends:
+            indicator_scores['btc_trend'] = -0.5
+        else:
+            indicator_scores['btc_trend'] = 0.3
 
         # Sentiment
         indicator_scores['sentiment'] = -1.2 if sentiment == 'bearish' else (-0.3 if sentiment == 'neutral' else 0.3)

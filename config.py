@@ -364,34 +364,26 @@ FAST_DROP_PROTECTION = {
 
 
 # ============================================================
-# 24. STRATEGY ACTIVATION AND WEIGHTS  [bot]
+# 24. STRATEGY ACTIVATION  [bot]
 # ============================================================
-ENABLE_CORE_STRATEGY   = True
-ENABLE_MEAN_REVERSION  = True
-ENABLE_BREAKOUT_SNIPER = True
-ENABLE_RANGE_BREAK     = True
-ENABLE_SWING_STRATEGY  = True
+# Honest list of what the bot actually runs (Phase 6 audit):
+#   * Core Strategy  — main.py core_strategy_scan, scores via score.py.
+#                      Produces "Scalp", "Intraday", "Swing" trade_types.
+#   * Scalp Hunter   — scalp_hunter.py, a SEPARATE compression-expansion
+#                      detector with its own gates and 20x leverage profile.
+#                      Runs after core scan in core_strategy_scan().
+#
+# Previously this section declared 5 strategies with weight tables for
+# `mean_reversion`, `breakout_sniper`, `range_break`, and `swing_strategy`.
+# NONE of those had implementations — grep confirmed they were string-only
+# references in config + risk_manager + positions_manager that never matched
+# any actual signal. Removed to stop misleading future readers.
+ENABLE_CORE_STRATEGY = True
+ENABLE_SCALP_HUNTER  = True  # toggle scalp_hunter_scan inside main.core_strategy_scan
 
-STRATEGY_RISK_WEIGHTS = {
-    "core_strategy":   1.0,   # full risk
-    "mean_reversion":  0.85,
-    "breakout_sniper": 0.7,
-    "swing":           0.8,
-    "range_break":     0.9,
-}
-
-STRATEGY_MIN_SCORES = {
-    "core_strategy":   7,
-    "mean_reversion":  4,
-    "breakout_sniper": 4,
-    "swing":           8,
-    "range_break":     6,
-}
-
-STRATEGY_REGIME_PREFERENCES = {
-    "core_strategy":   ["trending", "volatile"],
-    "mean_reversion":  ["ranging", "consolidating"],
-    "breakout_sniper": ["volatile", "trending"],
-    "swing":           ["trending", "ranging"],
-    "range_break":     ["ranging", "consolidating"],
-}
+# Notes for future strategy development:
+#   - "Swing" is a TRADE TYPE inside Core Strategy (score.py:TRADE_TYPE_TF["Swing"]),
+#     NOT a separate strategy module. Toggle by raising/lowering MIN_SWING_SCORE.
+#   - Adding a real new strategy means: implement the scan function, hook it
+#     into run_core_bot() under the task supervisor, and wire its result through
+#     the same execute_trade_if_valid() path used by Core Strategy.

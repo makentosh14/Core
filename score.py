@@ -1098,19 +1098,15 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
         tf_scores[tf] = round(score, 2)
 
     # ── Apply timeframe bonuses ──────────────────────────────────────────────
-    # Diagnosis fix (no scalps): the previous rule gave Intraday a 1.15x
-    # bonus whenever it had its 2 TFs (5m+15m, almost always), and gave
-    # Scalp 1.2x only with 2 TFs (1m AND 3m, rarely both present). Net
-    # effect: Intraday almost always won the `max(type_scores)` selection
-    # and Scalp tier was effectively dead. Rebalanced so Scalp gets a
-    # SOLO-tf modest bonus and Intraday's bonus is smaller.
-    if type_scores["Scalp"] > 0:
-        if tf_count["Scalp"] >= 2:
-            type_scores["Scalp"] *= 1.25
-        else:
-            type_scores["Scalp"] *= 1.10   # solo-1m still gets a small bonus
+    # REVERTED: prior rebalance (Scalp 1.25x/1.10x, Intraday 1.08x) made
+    # Scalp dominant — 244 of 265 trades over 30 days were Scalp at PF 0.71,
+    # losing $94 of $1000. The Scalp tier loses money on these weights;
+    # restoring the original tier-bonus values so Intraday wins the max()
+    # selection by default (and Scalp tier mostly stays dormant).
+    if type_scores["Scalp"] > 0 and tf_count["Scalp"] >= 2:
+        type_scores["Scalp"] *= 1.2
     if type_scores["Intraday"] > 0 and tf_count["Intraday"] >= 2:
-        type_scores["Intraday"] *= 1.08    # was 1.15
+        type_scores["Intraday"] *= 1.15
 
     # ── Find best trade type ─────────────────────────────────────────────────
     valid_types = [t for t in type_scores if tf_count[t] >= MIN_TF_REQUIRED[t]]

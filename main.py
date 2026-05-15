@@ -78,11 +78,11 @@ SIGNAL_COOLDOWN_TIME = 3600  # 1 hour cooldown after signal
 EXIT_COOLDOWN = 120          # 2 minutes cooldown after exit
 
 # ── QUALITY PATCH: tightened score thresholds ────────────────────────────────
-# Diagnosis fix (no scalps): MIN_SCALP_SCORE 10.5 was almost-unreachable for
-# the Scalp tier given it only accumulates points from 1-2 TFs while Intraday
-# accumulates from 5m+15m. Lowered to 9.0 to make Scalp viable; works in
-# concert with the rebalanced TF bonuses in score.py.
-MIN_SCALP_SCORE    = 9.0     # was 10.5 — Scalp tier needs lower bar
+# REVERTED post-diagnostic: lowering MIN_SCALP_SCORE to 9.0 produced 244
+# Scalp trades at PF 0.71 over 30 days (lost $94 of $1000). The Scalp tier
+# loses money on these weights — the prior "no Scalp trades" wasn't a bug,
+# it was the scoring math correctly hiding a losing tier. Restored to 10.5.
+MIN_SCALP_SCORE    = 10.5    # restored — Scalp tier is structurally unprofitable
 MIN_INTRADAY_SCORE = 12.0    # unchanged
 MIN_SWING_SCORE    = 15.5    # unchanged
 

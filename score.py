@@ -1314,12 +1314,150 @@ def enhanced_score_symbol(symbol, candles_by_timeframe, market_context=None):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ML-BASED SCORER (Phase 7 Turn 3)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Drop-in replacement for enhanced_score_symbol that uses a trained
+# logistic-regression model instead of the hand-tuned WEIGHTS dict.
+#
+# The model was trained on labeled_dataset_30d.csv with:
+#   * label = 1 iff a >= 2% move happens within next 20 × 5m bars (100 min)
+#   * features = ~436 indicator booleans/floats from analyze_tf on 5m/15m/60m
+#   * temporal train/test split (no shuffling)
+#
+# Phase 7 Turn 2 result on this dataset:
+#   AUC = 0.612  (genuine predictive signal, above the 0.6 audit threshold)
+#
+# How to enable:
+#   Set the module-level _ML_MODEL via load_ml_model() once at startup,
+#   then call score_symbol_ml() instead of score_symbol/enhanced_score_symbol.
+#   main.py can swap based on a config flag.
+#
+# Returns the SAME 5-tuple shape as score_symbol so it's drop-in compatible:
+#   (score: float, tf_scores: dict, trade_type: str, indicator_scores: dict, used_indicators: list)
+#
+# Score scaling: model.predict_proba returns 0-1 → multiplied by 100 so the
+# downstream gates (MIN_INTRADAY_SCORE = 12.0) need to be re-tuned for the
+# ML model. Suggested gate for AUC 0.612 model: ~85 (top ~15% by probability).
+
+_ML_MODEL = None
+_ML_FEATURE_COLUMNS = None
+_ML_THRESHOLD = 0.5
+
+
+def load_ml_model(
+    model_path: str = "score_model.pkl",
+    columns_path: str = "score_model_columns.json",
+):
+    """Load the trained model + feature list once. Idempotent."""
+    global _ML_MODEL, _ML_FEATURE_COLUMNS, _ML_THRESHOLD
+    if _ML_MODEL is not None:
+        return _ML_MODEL  # already loaded
+    try:
+        import joblib
+        import json as _json
+        _ML_MODEL = joblib.load(model_path)
+        with open(columns_path, "r") as f:
+            data = _json.load(f)
+        _ML_FEATURE_COLUMNS = data.get("feature_columns", [])
+        _ML_THRESHOLD = float(data.get("chosen_threshold", 0.5))
+        log(f"✅ ML scorer loaded: {len(_ML_FEATURE_COLUMNS)} features, "
+            f"threshold={_ML_THRESHOLD:.4f}")
+    except Exception as e:
+        log(f"❌ Failed to load ML model: {e}", level="ERROR")
+        _ML_MODEL = None
+        _ML_FEATURE_COLUMNS = None
+    return _ML_MODEL
+
+
+def score_symbol_ml(symbol, candles_by_timeframe, market_context=None):
+    """Drop-in replacement for enhanced_score_symbol using the trained model.
+
+    Returns the same 5-tuple shape:
+      (score, tf_scores, trade_type, indicator_scores, used_indicators)
+
+    Score is the model's predicted probability × 100 (range 0-100). The
+    downstream gate in main.py / BacktestEngine should be set around 50-85
+    depending on desired precision/recall trade-off.
+
+    If the model isn't loaded, falls back to enhanced_score_symbol.
+    """
+    if _ML_MODEL is None:
+        # Attempt to load on first call; if still fails, fall back.
+        load_ml_model()
+        if _ML_MODEL is None:
+            return enhanced_score_symbol(symbol, candles_by_timeframe, market_context)
+
+    try:
+        from labeled_dataset_builder import extract_features_for_inference
+        features = extract_features_for_inference(candles_by_timeframe)
+    except Exception as e:
+        log(f"⚠️ {symbol}: ML feature extraction failed ({e}), falling back", level="WARN")
+        return enhanced_score_symbol(symbol, candles_by_timeframe, market_context)
+
+    if not features:
+        return 0.0, {}, "Intraday", {}, []
+
+    # Build a feature vector in the exact column order the model expects.
+    # Missing features → 0. Bool → int.
+    import numpy as np
+    try:
+        row = []
+        for col in _ML_FEATURE_COLUMNS:
+            v = features.get(col, 0)
+            if isinstance(v, bool):
+                v = int(v)
+            try:
+                row.append(float(v))
+            except (TypeError, ValueError):
+                row.append(0.0)
+        X = np.array([row], dtype=float)
+        proba = float(_ML_MODEL.predict_proba(X)[0, 1])
+    except Exception as e:
+        log(f"⚠️ {symbol}: ML inference failed ({e}), falling back", level="WARN")
+        return enhanced_score_symbol(symbol, candles_by_timeframe, market_context)
+
+    # Score = proba × 100 for compatibility with existing gate scale.
+    score = round(proba * 100.0, 2)
+
+    # For trade_type / direction, fall back to score.py's existing logic by
+    # examining the TF closes. The model itself only predicts "move imminent
+    # in either direction" — we use the recent EMA slope to pick a side.
+    tf_scores: dict = {}
+    direction_hint = "Long"
+    try:
+        for tf in ("1", "3", "5", "15"):
+            bars = candles_by_timeframe.get(tf, [])
+            if len(bars) < 21:
+                continue
+            closes = [float(c["close"]) for c in bars[-21:]]
+            ema9 = sum(closes[-9:]) / 9
+            ema21 = sum(closes) / 21
+            tf_scores[tf] = round((ema9 - ema21) / ema21 * 100, 3) if ema21 > 0 else 0.0
+        # Direction from EMA slope on primary 5m bar
+        if "5" in tf_scores and tf_scores["5"] < 0:
+            direction_hint = "Short"
+    except Exception:
+        pass
+
+    # We expose the probability as the only "indicator score" — it's a
+    # single composite. trade_type defaults to Intraday (what the model
+    # was trained for).
+    indicator_scores = {"ml_proba": proba, "ml_direction_hint": direction_hint}
+    used_indicators = ["ml_model"]
+
+    return score, tf_scores, "Intraday", indicator_scores, used_indicators
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Exports
 # ─────────────────────────────────────────────────────────────────────────────
 
 __all__ = [
     'score_symbol',
     'enhanced_score_symbol',
+    'score_symbol_ml',
+    'load_ml_model',
     'determine_direction',
     'determine_direction_with_pattern_priority',
     'calculate_confidence',

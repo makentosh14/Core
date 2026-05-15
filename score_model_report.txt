@@ -1,0 +1,46 @@
+TRAINING REPORT
+============================================================
+dataset:           labeled_dataset_30d.csv
+rows:              5054
+positives:         891
+negatives:         4163
+features:          436
+model:             logreg
+test AUC:          0.6118
+chosen threshold:  0.9936
+precision @ thr:   0.5000
+recall    @ thr:   0.0795
+
+TOP POSITIVE COEFFICIENTS (predict pump):
+   +1.8123  15m_rsi
+   +1.6495  60m_adx
+   +1.5909  5m_atr_pct
+   +1.4331  60m_wr_ob
+   +1.3506  5m_price_vs_ema9
+   +1.3213  60m_cci
+   +1.2220  15m_cmf
+   +1.0849  15m_bb_pctb
+   +1.0520  60m_rsi_ob
+   +1.0440  5m_above_200ema
+   +1.0349  60m_rsi_extreme_ob
+   +1.0084  15m_wr
+   +0.9538  60m_ll
+   +0.9465  15m_low_vol
+   +0.9051  60m_stoch_k
+
+TOP NEGATIVE COEFFICIENTS (predict NO pump):
+   -2.7977  5m_vwap_dist
+   -2.3220  15m_adx
+   -1.8468  60m_range_pos
+   -1.5717  60m_mfi
+   -1.4319  60m_3green
+   -1.2185  60m_st_strong
+   -1.1125  15m_cmf_pos
+   -0.9816  15m_cci_ob
+   -0.9554  60m_macd_below_zero
+   -0.9467  60m_big_bull_candle
+   -0.9287  15m_mfi
+   -0.9163  60m_bb_below_lo
+   -0.9137  5m_stoch_k
+   -0.9130  60m_cci_os
+   -0.9044  60m_bb_near_up

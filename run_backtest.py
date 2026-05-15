@@ -90,6 +90,16 @@ async def main():
         help="Timeframe whose ATR to use for sizing (default: 15)",
     )
     parser.add_argument(
+        "--use-ml", action="store_true",
+        help="Use trained ML scorer (Phase 7) instead of hand-tuned weights. "
+             "Requires score_model.pkl + score_model_columns.json in cwd.",
+    )
+    parser.add_argument(
+        "--ml-min-score", type=float, default=50.0,
+        help="Probability * 100 gate for ML mode (default: 50). "
+             "Higher = stricter (fewer trades, higher precision).",
+    )
+    parser.add_argument(
         "--verbose", action="store_true",
         help="Print every trade open/close",
     )
@@ -146,9 +156,13 @@ async def main():
         slippage_bps=args.slippage,
         use_atr_sl_tp=args.use_atr,
         atr_tf=args.atr_tf,
+        use_ml_scoring=args.use_ml,
+        ml_min_score=args.ml_min_score,
     )
     if args.use_atr:
         print(f"  [config] ATR-based SL/TP enabled (atr_tf={args.atr_tf})")
+    if args.use_ml:
+        print(f"  [config] ML scoring enabled (gate >= {args.ml_min_score:.0f})")
     engine = BacktestEngine(config, verbose=args.verbose)
 
     print(f"\nRunning backtest on {args.primary_tf}m primary timeline...")

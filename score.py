@@ -816,12 +816,24 @@ def score_symbol(symbol, candles_by_timeframe, market_context=None):
                     score += WEIGHTS["volume_spike"]
                     indicator_scores[f"{tf_label}_volume"] = WEIGHTS["volume_spike"]
 
-                # Volume Climax
+                # Volume Climax.
+                # Bug fix (volume.py audit): previous code added +volume_climax
+                # score for ANY climax. But detect_volume_climax returns
+                # ("buying", "selling") and a "buying climax" in classical TA
+                # is an EXHAUSTION TOP — bearish for longs. Now type-aware:
+                #   buying climax  → bearish for long signals (subtract)
+                #   selling climax → bullish for long signals (add)
                 vol_climax_result = detect_volume_climax(candles)
-                vol_climax_detected = bool(vol_climax_result[0]) if isinstance(vol_climax_result, tuple) else bool(vol_climax_result)
-                if vol_climax_detected:
-                    score += WEIGHTS["volume_climax"]
-                    indicator_scores[f"{tf_label}_volume_climax"] = WEIGHTS["volume_climax"]
+                if isinstance(vol_climax_result, tuple) and vol_climax_result[0]:
+                    climax_type = vol_climax_result[1]  # "buying" / "selling"
+                    if climax_type == "selling":
+                        # Selling climax = bearish exhaustion = potential bullish reversal
+                        score += WEIGHTS["volume_climax"]
+                        indicator_scores[f"{tf_label}_volume_climax_sell"] = WEIGHTS["volume_climax"]
+                    elif climax_type == "buying":
+                        # Buying climax = bullish exhaustion = potential bearish reversal
+                        score -= WEIGHTS["volume_climax"]
+                        indicator_scores[f"{tf_label}_volume_climax_buy"] = -WEIGHTS["volume_climax"]
                     used_indicators.add("volume_climax")
 
                 # Stealth accumulation

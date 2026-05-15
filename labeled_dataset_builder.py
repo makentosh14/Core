@@ -44,10 +44,16 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 
-# Pump detection — match indicator_backscan thresholds so the labels
-# represent the same kind of move the original backscan was built around.
-MIN_MOVE_PCT = 3.0
-FUTURE_BARS = 4         # how far ahead to look for the move (on primary TF)
+# Label settings — calibrated to match the runner analyzer's detection
+# window. The smoke test with future_bars=4 produced ZERO positives across
+# 30 days × 5 symbols × 8640 bars because 3% moves rarely complete in
+# 20 minutes; they typically take 1-2 hours. Defaults bumped to:
+#   * future_bars = 20 (= 100 min on 5m) — matches runner_analyzer.detect_runners
+#   * min_move_pct = 2.0 — catches moves that the bot's 1.0% Intraday SL
+#     can profit from, even if they don't reach the 3% "runner" definition.
+#     Users wanting only big-mover labels can override to 3.0 on the CLI.
+MIN_MOVE_PCT = 2.0
+FUTURE_BARS = 20
 FEATURE_TFS = ("5", "15", "60")
 PRIMARY_TF = "5"
 

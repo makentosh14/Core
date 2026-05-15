@@ -116,6 +116,18 @@ class BacktestConfig:
         "ETHUSDT": -2.0,
     })
 
+    # Phase 7 Turn 3: ML-based scoring. When True, the engine uses
+    # score.score_symbol_ml() instead of enhanced_score_symbol. The trained
+    # model returns 0-100 probability so the gates below must be raised
+    # accordingly (50-85 typical, depending on precision/recall target).
+    use_ml_scoring: bool = False
+    # When ML is enabled, override the trade-type gates with ML-appropriate
+    # thresholds. 50 = "model slightly favors pump"; 85 = "model very confident".
+    ml_min_score: float = 50.0
+    # Path to model artifacts (loaded lazily on first scoring call).
+    ml_model_path: str = "score_model.pkl"
+    ml_columns_path: str = "score_model_columns.json"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data models
@@ -520,9 +532,18 @@ class BacktestEngine:
         self.verbose = verbose
 
         if score_fn is None:
-            # Default: production scorer with all quality gates.
-            from score import enhanced_score_symbol
-            score_fn = enhanced_score_symbol
+            if config.use_ml_scoring:
+                # Load the trained model once and use score_symbol_ml.
+                from score import load_ml_model, score_symbol_ml
+                load_ml_model(
+                    model_path=config.ml_model_path,
+                    columns_path=config.ml_columns_path,
+                )
+                score_fn = score_symbol_ml
+            else:
+                # Default: production scorer with all quality gates.
+                from score import enhanced_score_symbol
+                score_fn = enhanced_score_symbol
         self.score_fn = score_fn
 
     # ─── trend context (synthetic from BTC) ───────────────────────────
@@ -685,15 +706,34 @@ class BacktestEngine:
                 adj = self.config.symbol_score_adjustment.get(symbol, 0.0)
                 adjusted_score = score + adj
 
-                gate = {
-                    "Scalp": self.config.min_scalp_score,
-                    "Intraday": self.config.min_intraday_score,
-                    "Swing": self.config.min_swing_score,
-                }.get(trade_type, self.config.min_intraday_score)
+                if self.config.use_ml_scoring:
+                    # ML model outputs 0-100 probability; use a single gate.
+                    gate = self.config.ml_min_score
+                else:
+                    gate = {
+                        "Scalp": self.config.min_scalp_score,
+                        "Intraday": self.config.min_intraday_score,
+                        "Swing": self.config.min_swing_score,
+                    }.get(trade_type, self.config.min_intraday_score)
                 if adjusted_score < gate:
                     continue
 
-                if self.config.require_clean_direction:
+                if self.config.use_ml_scoring:
+                    # ML scorer returns direction hint in indicator_scores;
+                    # extract or default to Long.
+                    direction = "long"  # safe default
+                    # _ind from score_fn is the 4th return; we lost it above.
+                    # Re-call lightly to get the hint? Simpler: rerun the
+                    # call and unpack again — but it's expensive. Instead
+                    # use the same EMA slope heuristic the ML scorer uses.
+                    primary_bars = view.get(primary_tf, [])
+                    if len(primary_bars) >= 21:
+                        closes = [float(c["close"]) for c in primary_bars[-21:]]
+                        ema9 = sum(closes[-9:]) / 9
+                        ema21 = sum(closes) / 21
+                        if ema21 > 0 and ema9 < ema21:
+                            direction = "short"
+                elif self.config.require_clean_direction:
                     from score import determine_direction
                     direction = determine_direction(tf_scores)
                     if direction is None:

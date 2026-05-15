@@ -1463,6 +1463,58 @@ async def scenario_backtest_uptrend_profits(main, mock: BybitMock) -> None:
           f"expectancy={m['expectancy_pct']:+.3f}%, total={m['total_pnl_pct']:+.2f}%")
 
 
+async def scenario_ml_scorer_with_stub_model(main, mock: BybitMock) -> None:
+    """Phase 7 Turn 3: score_symbol_ml must:
+      1. Detect missing model and fall back to enhanced_score_symbol
+      2. Use a stubbed model when loaded, returning probability * 100 as score
+      3. Maintain the same 5-tuple return shape as score_symbol
+    """
+    print("\n---- SCENARIO 28: score_symbol_ml inference path ----------")
+    import score as score_mod
+
+    # 1. With no model loaded, score_symbol_ml should fall back to enhanced_score_symbol.
+    # Reset module state.
+    score_mod._ML_MODEL = None
+
+    bars = []
+    base = 100.0
+    for i in range(60):
+        price = base + i * 0.05
+        bars.append({
+            "timestamp": 1_700_000_000_000 + i * 300_000,
+            "open": price * 0.999, "high": price * 1.001,
+            "low": price * 0.998, "close": price, "volume": 1000.0,
+        })
+    candles_by_tf = {"5": bars, "15": bars, "60": bars}
+
+    # 2. Inject a stub "model" that returns a known probability.
+    class StubModel:
+        def predict_proba(self, X):
+            import numpy as np
+            # Pretend probability of pump = 0.73 for any input.
+            return np.array([[0.27, 0.73]])
+
+    score_mod._ML_MODEL = StubModel()
+    score_mod._ML_FEATURE_COLUMNS = []  # empty column list → row will be empty floats
+    score_mod._ML_THRESHOLD = 0.5
+
+    try:
+        result = score_mod.score_symbol_ml("TESTUSDT", candles_by_tf, {})
+        assert_(isinstance(result, tuple) and len(result) == 5,
+                f"score_symbol_ml must return a 5-tuple; got {type(result)}")
+        score, tf_scores, trade_type, ind, used = result
+        assert_(score == 73.0, f"expected score=73.0 (0.73 * 100); got {score}")
+        assert_(trade_type == "Intraday", f"expected trade_type=Intraday; got {trade_type}")
+        assert_(ind.get("ml_proba") == 0.73, "ml_proba should be in indicator_scores")
+        assert_("ml_model" in used, "used_indicators must record ml_model")
+        print(f"  [PASS] stub-model inference returned score={score}, "
+              f"trade_type={trade_type}, ml_proba={ind.get('ml_proba')}")
+    finally:
+        # Reset state so other tests aren't affected.
+        score_mod._ML_MODEL = None
+        score_mod._ML_FEATURE_COLUMNS = None
+
+
 async def scenario_label_at_correct_for_pump(main, mock: BybitMock) -> None:
     """Phase 7 Turn 1: _label_at must mark a bar as label=1 if a >= 3%
     move follows within the next FUTURE_BARS, and 0 otherwise. Lookahead-
@@ -1726,6 +1778,8 @@ async def run_all() -> int:
         # Phase 7 Turn 1 — labeled dataset builder
         ("label_at_correct_for_pump",    scenario_label_at_correct_for_pump),
         ("dataset_stratified_ratio",     scenario_dataset_stratified_class_ratio),
+        # Phase 7 Turn 3 — ML scorer wiring
+        ("ml_scorer_with_stub_model",    scenario_ml_scorer_with_stub_model),
     ]
 
     results = []

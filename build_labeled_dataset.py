@@ -34,10 +34,10 @@ async def main():
                    help="Comma-separated TFs for feature extraction (default: 5,15,60)")
     p.add_argument("--primary-tf", default="5",
                    help="Primary TF for the decision timeline (default: 5)")
-    p.add_argument("--min-move-pct", type=float, default=3.0,
-                   help="Pump/dump threshold for label=1 (default: 3.0%%)")
-    p.add_argument("--future-bars", type=int, default=4,
-                   help="Bars ahead to check for the move (default: 4 = 20min on 5m)")
+    p.add_argument("--min-move-pct", type=float, default=2.0,
+                   help="Pump/dump threshold for label=1 (default: 2.0%%)")
+    p.add_argument("--future-bars", type=int, default=20,
+                   help="Bars ahead to check for the move (default: 20 = 100min on 5m)")
     p.add_argument("--negative-sample-rate", type=float, default=0.10,
                    help="Keep this fraction of negatives (default: 0.10)")
     p.add_argument("--output", default="labeled_dataset.csv")

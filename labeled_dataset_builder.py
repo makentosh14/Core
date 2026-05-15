@@ -373,12 +373,40 @@ def summarize_dataset(samples: List[LabeledSample]) -> str:
     return "\n".join(lines)
 
 
+def extract_features_for_inference(
+    candles_by_tf: Dict[str, List[Dict[str, Any]]],
+    primary_tf: str = PRIMARY_TF,
+    feature_tfs: tuple = FEATURE_TFS,
+) -> Dict[str, Any]:
+    """Inference-time wrapper around _build_features_at.
+
+    Given the most recent candles_by_tf (as passed to score.py at runtime),
+    extract the same feature dict the model was trained on. Anchors at
+    the LAST primary-TF bar so the features represent "right now."
+
+    Returns {} if no feature TF has enough history.
+    """
+    primary_candles = candles_by_tf.get(primary_tf, [])
+    if not primary_candles:
+        return {}
+    last_idx = len(primary_candles) - 1
+    features = _build_features_at(
+        primary_candles=primary_candles,
+        by_tf_candles=candles_by_tf,
+        primary_idx=last_idx,
+        primary_tf=primary_tf,
+        feature_tfs=feature_tfs,
+    )
+    return features or {}
+
+
 __all__ = [
     "DatasetBuilderConfig",
     "LabeledSample",
     "build_dataset",
     "write_dataset_csv",
     "summarize_dataset",
+    "extract_features_for_inference",
     "_label_at",
     "_build_features_at",
 ]

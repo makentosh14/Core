@@ -1543,41 +1543,87 @@ class EnhancedTrendOrchestrator:
                 base_trend, enhanced_strength, enhanced_confidence, market_regime
             )
             
+            # Second-pass audit fix: previous output didn't populate the
+            # legacy-compatibility keys that the rest of the bot (main.py +
+            # score.py + trend_filters.py.validate_short_signal) reads.
+            # Result: btc_trend always defaulted to "neutral", btc_confidence
+            # to 0, and regime "ranging" never matched (enhanced returns
+            # "range_bound"). Every trend-aware filter and bonus was
+            # silently dead in production. Populating both vocabularies
+            # below so existing consumers actually receive the analysis.
+            #
+            # base_trend comes from market_structure with values like
+            # "uptrend"/"downtrend"/"ranging" (legacy vocab). Translate to
+            # the bullish/bearish vocab the consumers expect, AND keep the
+            # original for backward compatibility.
+            _trend_to_btc_vocab = {
+                "uptrend": "bullish",
+                "strong_uptrend": "strong_bullish",
+                "downtrend": "bearish",
+                "strong_downtrend": "strong_bearish",
+                "ranging": "neutral",
+                "neutral": "neutral",
+            }
+            btc_trend_legacy = _trend_to_btc_vocab.get(base_trend, "neutral")
+
+            # Map regime to BOTH the enhanced labels and the score.py-
+            # expected "ranging" string. score.py only checks `regime ==
+            # "ranging"`; we keep `regime` for legacy compatibility and
+            # expose `regime_enhanced` for the rich label.
+            _regime_to_legacy = {
+                "range_bound": "ranging",
+                "altseason_momentum": "trending",
+                "strong_trend": "trending",
+                "breakout_imminent": "trending",
+                "institutional_accumulation": "trending",
+                "risk_off": "ranging",
+                "transitional": "transitional",
+            }
+            regime_legacy = _regime_to_legacy.get(market_regime, market_regime)
+
             return {
-                # Core trend data
+                # Core trend data (enhanced vocab)
                 "trend": base_trend,
                 "strength": enhanced_strength,
                 "confidence": enhanced_confidence,
-                "regime": market_regime,
-                
+                "regime": regime_legacy,             # ← matches score.py "ranging" check
+                "regime_enhanced": market_regime,    # original rich label preserved
+
+                # Legacy-vocab keys for main.py / score.py / trend_filters.py
+                # consumers that pre-date the enhanced rewrite.
+                "btc_trend": btc_trend_legacy,
+                "btc_strength": enhanced_strength,
+                "btc_confidence": enhanced_confidence,
+                "trend_strength": enhanced_strength,
+
                 # Enhanced components
                 "market_structure": structure,
                 "altseason": altseason,
                 "sentiment": sentiment,
                 "volume_profile": volume,
-                
+
                 # Derived insights
                 "market_phase": structure.get("market_phase", "neutral"),
                 "institutional_activity": institutional_activity.get("activity_level", "low"),
                 "accumulation_phase": accumulation_phase,
                 "breakout_probability": structure.get("breakout_probability", {}),
-                
+
                 # Trading context
                 "recommendations": recommendations,
                 "risk_level": self._assess_risk_level(enhanced_confidence, market_regime),
                 "opportunity_score": self._calculate_opportunity_score(structure, sentiment, volume),
-                
+
                 # Key levels
                 "support_levels": volume.get("support_resistance", {}).get("support_levels", [])[:3],
                 "resistance_levels": volume.get("support_resistance", {}).get("resistance_levels", [])[:3],
                 "poc_level": volume.get("poc_level"),
                 "value_area": volume.get("value_area", {}),
-                
+
                 # Metadata
                 "timestamp": datetime.now().isoformat(),
                 "analysis_quality": enhanced_confidence,
                 "data_sources": ["market_structure", "altseason", "sentiment", "volume_profile"],
-                "fixes_applied": "v2.0_all_critical_bugs_fixed"
+                "fixes_applied": "v2.1_consumer_interface_bridged",
             }
             
         except Exception as e:

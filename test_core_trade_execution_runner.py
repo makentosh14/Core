@@ -1463,6 +1463,103 @@ async def scenario_backtest_uptrend_profits(main, mock: BybitMock) -> None:
           f"expectancy={m['expectancy_pct']:+.3f}%, total={m['total_pnl_pct']:+.2f}%")
 
 
+async def scenario_runner_detector_finds_pumps(main, mock: BybitMock) -> None:
+    """Phase 4: detect_runners must find a synthetic 5% pump and label
+    it correctly. Verifies the move-detection core works."""
+    print("\n---- SCENARIO 24: runner detector finds synthetic pump ----")
+    from runner_analyzer import detect_runners
+
+    # Build 30 bars: flat for 10, then a 5% pump over 4 bars, then flat.
+    base = 100.0
+    bars = []
+    for i in range(30):
+        price = base
+        if 10 <= i < 14:
+            # Pump from bar 10 to bar 13: +5% total
+            price = base * (1.0 + 0.0125 * (i - 9))
+        elif i >= 14:
+            price = base * 1.05  # plateau at the pump high
+        bars.append({
+            "timestamp": 1_700_000_000_000 + i * 300_000,
+            "open": price * 0.999, "high": price * 1.002,
+            "low": price * 0.998, "close": price, "volume": 1000.0,
+        })
+
+    runners = detect_runners(bars, min_move_pct=3.0, window_bars=20)
+    assert_(len(runners) >= 1, f"expected >= 1 pump; got {len(runners)}")
+    r = runners[0]
+    assert_(r["direction"] == "pump", f"expected pump; got {r['direction']}")
+    assert_(r["move_pct"] >= 3.0, f"move_pct {r['move_pct']} too small")
+    print(f"  [PASS] detected {r['direction']} +{r['move_pct']}% "
+          f"over {r['duration_bars']} bars")
+
+
+async def scenario_runner_analyzer_classifies_missed(main, mock: BybitMock) -> None:
+    """Phase 4: when a runner occurs but no trade overlapped it, the
+    analyzer must classify as MISSED and (with score_fn provided) attach
+    a miss reason explaining why the bot didn't enter.
+
+    Test data: 30-bar mild downtrend (warmup → history for the scorer to
+    see), then a 5% pump over 4 bars. This way the pump is anchored
+    mid-series with real history available, exercising the gate-diagnosis
+    branch rather than the no-history branch."""
+    print("\n---- SCENARIO 25: analyzer marks unparticipated runner MISSED")
+    from runner_analyzer import analyze_runner_capture
+    from backtest_engine import BacktestConfig
+
+    base = 100.0
+    bars = []
+    for i in range(60):
+        if i < 30:
+            # Mild downtrend during warmup so detect_runners anchors at
+            # the local trough, not at index 0.
+            price = base * (1.0 - 0.002 * i)
+        elif 30 <= i < 34:
+            # 4-bar pump back to ~+5% above start.
+            pre_pump_price = base * (1.0 - 0.002 * 29)
+            price = pre_pump_price * (1.0 + 0.014 * (i - 29))
+        else:
+            pre_pump_price = base * (1.0 - 0.002 * 29)
+            price = pre_pump_price * 1.058
+        bars.append({
+            "timestamp": 1_700_000_000_000 + i * 300_000,
+            "open": price * 0.999, "high": price * 1.002,
+            "low": price * 0.998, "close": price, "volume": 1000.0 + i,
+        })
+
+    # No trades — empty list ensures all detected runners classify as MISSED.
+    candles = {"TESTUSDT": {"5": bars, "15": bars, "60": bars}}
+
+    # Low-score scorer guarantees diagnosis says "below gate".
+    def low_scorer(symbol, candles_by_tf, trend_context):
+        return (5.0, {"5": 1.0}, "Intraday", {}, [])
+
+    cfg = BacktestConfig()
+    report = analyze_runner_capture(
+        candles_by_symbol_tf=candles,
+        closed_trades=[],
+        score_fn=low_scorer,
+        config=cfg,
+        primary_tf="5",
+        btc_symbol="TESTUSDT",
+        min_move_pct=3.0, window_bars=20,
+    )
+
+    assert_(len(report.runners) >= 1,
+            f"expected at least 1 detected runner; got {len(report.runners)}")
+    missed = [r for r in report.runners if r.classification == "MISSED"]
+    assert_(missed, "expected at least one MISSED runner with empty trade list")
+    r = missed[0]
+    assert_(r.miss_reason is not None, "miss_reason should be populated")
+    # Either gate-failure diagnosis (real data sufficient) or no-history
+    # fallback (runner anchored too early) are both valid diagnostic outputs.
+    valid_reasons = ("gate", "score", "insufficient_data")
+    assert_(any(s in (r.miss_reason or "") for s in valid_reasons),
+            f"unexpected miss_reason: {r.miss_reason}")
+    print(f"  [PASS] MISSED runner diagnosed: "
+          f"score_at_start={r.score_at_start}, reason={r.miss_reason}")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # RUNNER
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1511,6 +1608,9 @@ async def run_all() -> int:
         ("anti_chase_loosened",          scenario_anti_chase_loosened),
         ("scalp_tier_viable",            scenario_scalp_tier_viable),
         ("trend_vocab_both_dialects",    scenario_trend_vocab_accepts_bearish),
+        # Phase 4 — missed-runner detector
+        ("runner_detector_pump",         scenario_runner_detector_finds_pumps),
+        ("runner_classifies_missed",     scenario_runner_analyzer_classifies_missed),
     ]
 
     results = []

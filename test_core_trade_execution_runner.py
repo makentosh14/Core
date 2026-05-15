@@ -1463,6 +1463,74 @@ async def scenario_backtest_uptrend_profits(main, mock: BybitMock) -> None:
           f"expectancy={m['expectancy_pct']:+.3f}%, total={m['total_pnl_pct']:+.2f}%")
 
 
+async def scenario_volume_cache_no_cross_symbol_pollution(main, mock: BybitMock) -> None:
+    """volume.py audit: get_average_volume must NOT return one symbol's
+    cached value for another symbol. Prior cache key was f"avg_vol_{len}_{window}"
+    which collided across symbols of the same candle count, silently
+    polluting every volume-ratio check in score.py.
+
+    Test: two different volume profiles, same candle count. Both calls
+    must return distinct averages."""
+    print("\n---- SCENARIO 29: volume cache no cross-symbol pollution ---")
+    from volume import get_average_volume
+
+    # Symbol A: high volume baseline
+    candles_a = [
+        {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 1_000_000}
+        for _ in range(100)
+    ]
+    # Symbol B: low volume baseline (10× smaller)
+    candles_b = [
+        {"open": 100, "high": 101, "low": 99, "close": 100, "volume": 100_000}
+        for _ in range(100)
+    ]
+
+    avg_a = get_average_volume(candles_a, window=20)
+    avg_b = get_average_volume(candles_b, window=20)
+
+    assert_(avg_a == 1_000_000.0,
+            f"symbol A average wrong: expected 1_000_000, got {avg_a}")
+    assert_(avg_b == 100_000.0,
+            f"symbol B average wrong: expected 100_000, got {avg_b}  "
+            f"-- if this equals 1_000_000, the cross-symbol cache pollution "
+            f"bug has regressed.")
+    assert_(avg_a != avg_b,
+            "DIFFERENT symbols with DIFFERENT volume profiles must produce "
+            "DIFFERENT averages, but got the same value (cache pollution).")
+    print(f"  [PASS] symbol A avg={avg_a:.0f}, symbol B avg={avg_b:.0f} (no cross-pollution)")
+
+
+async def scenario_volume_pattern_lookback_respected(main, mock: BybitMock) -> None:
+    """volume.py audit: is_volume_increasing(candles, lookback=N) must
+    actually use N candles, not always 5. Pass a 20-candle series where
+    the LAST 5 are decreasing but the LAST 20 are increasing — the
+    function must return False for lookback=5 and True for lookback=20."""
+    print("\n---- SCENARIO 30: is_volume_increasing respects lookback ----")
+    from volume import is_volume_increasing
+
+    # Last 20 candles: increasing trend overall.
+    # Last 5 candles: DECREASING (lower volume than the prior bars).
+    base_vol = 1_000
+    bars = []
+    # 15 increasing bars: 1000, 1100, 1200, ..., 2400
+    for i in range(15):
+        bars.append({"open": 100, "high": 101, "low": 99, "close": 100,
+                     "volume": base_vol + i * 100})
+    # 5 decreasing bars: 2300, 2200, 2100, 2000, 1900
+    for i in range(5):
+        bars.append({"open": 100, "high": 101, "low": 99, "close": 100,
+                     "volume": 2300 - i * 100})
+
+    # Last 5 bars are DECREASING → lookback=5 should say False
+    inc_5 = is_volume_increasing(bars, lookback=5)
+    # Last 20 bars trend INCREASING (despite tail dip) → lookback=20 should say True
+    inc_20 = is_volume_increasing(bars, lookback=20)
+
+    assert_(not inc_5, f"with lookback=5 (decreasing tail), expected False; got {inc_5}")
+    assert_(inc_20, f"with lookback=20 (increasing trend), expected True; got {inc_20}")
+    print(f"  [PASS] lookback=5 -> {inc_5}, lookback=20 -> {inc_20}")
+
+
 async def scenario_ml_scorer_with_stub_model(main, mock: BybitMock) -> None:
     """Phase 7 Turn 3: score_symbol_ml must:
       1. Detect missing model and fall back to enhanced_score_symbol
@@ -1780,6 +1848,9 @@ async def run_all() -> int:
         ("dataset_stratified_ratio",     scenario_dataset_stratified_class_ratio),
         # Phase 7 Turn 3 — ML scorer wiring
         ("ml_scorer_with_stub_model",    scenario_ml_scorer_with_stub_model),
+        # volume.py audit fixes
+        ("volume_cache_no_pollution",    scenario_volume_cache_no_cross_symbol_pollution),
+        ("volume_pattern_lookback",      scenario_volume_pattern_lookback_respected),
     ]
 
     results = []

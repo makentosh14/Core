@@ -94,23 +94,22 @@ def is_volume_spike(candles: List[Dict], multiplier: float = 2.5,
         ))
         return False
 
-def detect_volume_pattern(candles: List[Dict], pattern_type: str = "increasing") -> bool:
+def detect_volume_pattern(candles: List[Dict], pattern_type: str = "increasing",
+                          lookback: int = 5) -> bool:
     """
-    Detect specific volume patterns
-    
-    Args:
-        candles: List of candle dictionaries
-        pattern_type: Type of pattern to detect ("increasing", "decreasing", "divergence")
-        
-    Returns:
-        bool: True if pattern detected
+    Detect specific volume patterns.
+
+    BUG FIX (volume.py audit): previous version hardcoded a 5-bar window
+    internally, silently overriding any `lookback` passed by the caller.
+    The is_volume_increasing/is_volume_decreasing wrappers below pass
+    lookback values that used to be ignored. Now lookback is respected.
     """
     try:
-        if len(candles) < 5:
+        if len(candles) < lookback:
             return False
-            
-        volumes = get_volumes_array(candles[-5:])
-        prices = np.array([float(c['close']) for c in candles[-5:]])
+
+        volumes = get_volumes_array(candles[-lookback:])
+        prices = np.array([float(c['close']) for c in candles[-lookback:]])
         
         if pattern_type == "increasing":
             # Check if volumes are generally increasing
@@ -191,35 +190,27 @@ def detect_slow_ramp(candles: List[Dict], lookback: int = 6,
         return False
 
 def get_average_volume(candles: List[Dict], window: int = 20) -> float:
-    """
-    Enhanced average volume calculation with caching
-    
-    Args:
-        candles: List of candle dictionaries
-        window: Period for average calculation
-        
-    Returns:
-        float: Average volume over the window period
+    """Average volume over the last `window` candles.
+
+    BUG FIX (volume.py audit, critical): previous implementation cached by
+    cache_key = f"avg_vol_{len(candles)}_{window}" — NOT keyed by symbol.
+    With the live bot scanning 50+ symbols all having warm deques at the
+    same maxlen, every symbol's call collided on the same cache key. The
+    first symbol's average was returned for every subsequent symbol of
+    the same length. This silently corrupted every volume-ratio check in
+    score.py (get_minimum_volume_threshold, check_volume_quality,
+    calculate_volume_penalty, has_pump_potential).
+
+    Caching removed: np.mean of ~20 floats is microseconds; caching cost
+    more than it saved AND poisoned the data.
     """
     if not candles or len(candles) < window:
         return 0.0
-    
-    # Generate cache key (simplified without symbol for this function)
-    cache_key = f"avg_vol_{len(candles)}_{window}"
-    
-    # Check cache
-    if cache_key in _volume_cache and _is_cache_valid(cache_key):
-        return _volume_cache[cache_key]
-    
     try:
         volumes = get_volumes_array(candles[-window:])
-        avg_volume = float(np.mean(volumes)) if len(volumes) > 0 else 0.0
-        
-        # Update cache
-        _update_cache(cache_key, avg_volume)
-        
-        return avg_volume
-        
+        if len(volumes) == 0:
+            return 0.0
+        return float(np.mean(volumes))
     except Exception as e:
         log(f"Error calculating average volume: {e}", level="ERROR")
         return 0.0
@@ -451,11 +442,11 @@ def analyze_volume_trend(candles: List[Dict], periods: List[int] = [5, 10, 20]) 
         log(f"Error analyzing volume trend: {e}", level="ERROR")
         return {}
 
-# Backward compatibility wrapper
+# Backward compatibility wrapper. Now properly forwards `lookback`.
 def is_volume_increasing(candles: List[Dict], lookback: int = 5) -> bool:
-    """Check if volume is increasing over the lookback period"""
-    return detect_volume_pattern(candles[-lookback:], "increasing")
+    """Check if volume is increasing over the lookback period."""
+    return detect_volume_pattern(candles, "increasing", lookback=lookback)
 
 def is_volume_decreasing(candles: List[Dict], lookback: int = 5) -> bool:
-    """Check if volume is decreasing over the lookback period"""
-    return detect_volume_pattern(candles[-lookback:], "decreasing")
+    """Check if volume is decreasing over the lookback period."""
+    return detect_volume_pattern(candles, "decreasing", lookback=lookback)
